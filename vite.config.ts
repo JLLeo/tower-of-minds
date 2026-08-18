@@ -15,6 +15,13 @@ function llmProxy(baseUrl: string, apiKey: string): Plugin {
       server.middlewares.use('/api/llm', (req, res) => {
         void (async () => {
           try {
+            // 只放行 Intent 需要的那一条路径，避免这层变成一个通用的、带 key 的开放代理。
+            if (req.url !== '/chat/completions') {
+              res.statusCode = 404;
+              res.end();
+              return;
+            }
+
             const chunks: Uint8Array[] = [];
             for await (const chunk of req) chunks.push(chunk as Uint8Array);
 

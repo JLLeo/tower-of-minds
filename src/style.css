@@ -36,13 +36,13 @@ body {
   padding-bottom: 12px;
 }
 
-.foes {
+.combatants {
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
 }
 
-.foe {
+.combatant {
   flex: 1 1 200px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -50,16 +50,16 @@ body {
   padding: 12px 16px;
 }
 
-.foe-down {
+.combatant-down {
   opacity: 0.35;
 }
 
-.foe h2 {
+.combatant h2 {
   margin: 0 0 8px;
   font-size: 16px;
 }
 
-.foe-next {
+.combatant-next {
   margin-top: 8px;
   font-size: 13px;
   color: var(--accent);
@@ -271,13 +271,13 @@ button.primary:disabled {
   color: #d2797f;
 }
 
-.foe-line {
+.combatant-line {
   margin-top: 4px;
   font-size: 13px;
   color: var(--ink);
   opacity: 0.75;
 }
 
-.foe-thinking {
+.combatant-thinking {
   opacity: 0.6;
 }

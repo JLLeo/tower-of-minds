@@ -93,7 +93,7 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
     case 'execution_input':
       return resolvePending(state, input.atMs);
     case 'intent_response':
-      return receiveIntent(state, input.combatantId, input.payload);
+      return receiveIntent(state, input.combatantId, input.requestedAtMs, input.payload);
     case 'tick':
       return expireIntent(expireIfWindowClosed(state, input.atMs), input.atMs);
   }
@@ -218,9 +218,16 @@ function settleIntent(
   };
 }
 
-function receiveIntent(state: RunState, combatantId: string, payload: unknown): RunState {
+function receiveIntent(
+  state: RunState,
+  combatantId: string,
+  requestedAtMs: number,
+  payload: unknown,
+): RunState {
   const request = state.encounter.intentRequest;
   if (!request || request.combatantId !== combatantId) return state;
+  // 迟到的响应：它回答的是已经被超时顶掉的那次提问，战况早已不同，丢掉。
+  if (request.requestedAtMs !== requestedAtMs) return state;
 
   const combatant = state.encounter.combatants.find((c) => c.id === combatantId);
   if (!combatant) return state;
@@ -443,10 +450,10 @@ function endTurn(state: RunState, atMs: number): RunState {
       const { block, dealt } = absorb(player.block, action.amount);
       player = { ...player, block, hp: Math.max(0, player.hp - dealt) };
       combatants[i] = acted;
-      journal.push(`${combatant.name}${action.description}，造成 ${dealt} 点伤害。`);
+      journal.push(`${combatant.name}进攻，造成 ${dealt} 点伤害。`);
     } else {
       combatants[i] = { ...acted, block: action.amount };
-      journal.push(`${combatant.name}${action.description}。`);
+      journal.push(`${combatant.name}架起 ${action.amount} 点格挡。`);
     }
   }
 

@@ -11,5 +11,5 @@ Agent 的每回合 Intent 决策走 `deepseek-v4-flash`，Run 开局的 Generati
 - DeepSeek 未文档化严格的 schema 约束解码，因此引擎**必须**校验返回的 Intent 是否落在合法动作集内，非法即退回启发式选择。ADR-0001 已经要求了这条退路，这里只是把它从可选变成必需。
 - 峰时价是闲时的两倍（峰时为 UTC 01:00–04:00 与 06:00–10:00，即北京时间 09:00–12:00 与 14:00–18:00）——正好覆盖开发时段，估算成本时按峰时算。
 - cache hit 的输入价约为 cache miss 的 1/31，所以"共享规则前缀 + 每 Agent 私有后缀"的 prompt 结构不是优化，是必须。
-- 每回合的延迟没有官方承诺值，2.5 秒预算必须实测。**已实测**（`scripts/smoke-deepseek.mjs`，10 次调用）：中位 359ms、最慢 564ms、均值 371ms，10/10 返回合法 actionId，输入 224 token 中 128 命中缓存。预算有近 7 倍余量，所以 #6 的「在 Execution Check 期间预取 Intent」是锦上添花，不是必需品。
+- 每回合的延迟没有官方承诺值，2.5 秒预算必须实测。**已实测**（`npm run smoke`，8 次调用，走的是出货代码路径：真实 prompt、真实 provider、由引擎判定合法性）：中位 974ms、最慢 1441ms、均值 991ms，8/8 被引擎接受。预算成立，但余量只有约 1.7 倍，不是宽裕到可以忽略——#6 把 Intent 预取到 Execution Check 期间的决定仍然必要。
 - **必须显式关闭 thinking：`thinking: { type: 'disabled' }`。** 这个模型默认开着思考，reasoning token 计入 completion_tokens，会吃光 max_tokens 导致输出被截断（实测 max_tokens=120 时 5/5 全部截断成非法响应）。实测只有这一种写法有效：`reasoning_effort: 'none'` 会让模型明显变笨（返回 `actionId: "1"`），`enable_thinking: false` 被直接忽略。关掉之后输出从约 86 token 降到约 20 token。

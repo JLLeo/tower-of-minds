@@ -40,7 +40,7 @@ export interface CombatantAction {
   readonly id: string;
   readonly kind: 'attack' | 'defend';
   readonly amount: number;
-  /** 给 LLM 看的说明。引擎只认 kind 和 amount。 */
+  /** 给模型和玩家看的说明。引擎结算只认 kind 和 amount，不解析这段文字。 */
   readonly description: string;
 }
 
@@ -163,8 +163,16 @@ export type PlayerInput =
   /**
    * 模型对一次 IntentRequest 的原样响应。payload 是 unknown：解析与合法性校验
    * 都归引擎（ADR-0001），宿主只负责把网络上拿到的东西原封不动送进来。
+   *
+   * requestedAtMs 用来指认这是在回答哪一次请求。超时回退之后迟到的响应带着
+   * 过期的时刻，会被引擎丢掉——否则它会顶掉下一回合的 Intent，而那是它没看过的战况。
    */
-  | { readonly type: 'intent_response'; readonly combatantId: string; readonly payload: unknown }
+  | {
+      readonly type: 'intent_response';
+      readonly combatantId: string;
+      readonly requestedAtMs: number;
+      readonly payload: unknown;
+    }
   | { readonly type: 'execution_input'; readonly atMs: number }
   /**
    * 时间的流逝。UI 每帧上报当前时刻，引擎据此判断判定窗口是否已经耗尽——

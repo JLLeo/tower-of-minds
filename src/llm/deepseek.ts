@@ -1,7 +1,19 @@
+import { CARD_POOL } from '../engine/content.js';
 import type { IntentContext, IntentProvider } from './provider.js';
 
+function describeCard(card: (typeof CARD_POOL)[number]): string {
+  const parts: string[] = [];
+  if (card.damage !== undefined) parts.push(`造成 ${card.damage} 伤害`);
+  if (card.block !== undefined) parts.push(`获得 ${card.block} 格挡`);
+  return parts.join('，');
+}
+
+const CARD_POOL_LINES = CARD_POOL.map(
+  (card) => `- ${card.name}（${card.cost} 费）：${describeCard(card)}`,
+).join('\n');
+
 /**
- * 稳定前缀：规则与回答格式。它在所有请求、所有 Agent 之间完全一致，
+ * 稳定前缀：规则、回答格式与固定卡池。它在所有请求、所有 Agent 之间完全一致，
  * 因此能命中 context cache——实测 224 个输入 token 里有 128 个走缓存价。
  * 任何按局变化的东西都必须留到 user 消息里，否则前缀失效、成本翻倍。
  */
@@ -9,7 +21,10 @@ const SYSTEM_PROMPT = `你在一款卡牌 roguelike 里扮演塔中的一个角�
 每回合你会收到一份合法动作清单，你只能从中挑一个。你不能发明新动作、新数值或新效果——
 清单之外的任何东西都会被引擎丢弃。
 用 JSON 回答，形如 {"actionId": "<清单里的 id>", "line": "<一句不超过 20 字的台词>"}。
-台词要反映你的动机，不要复述动作本身。`;
+台词要反映你的动机，不要复述动作本身。
+
+对手用的牌来自这个固定卡池：
+${CARD_POOL_LINES}`;
 
 function userPrompt(context: IntentContext): string {
   const { combatant } = context;

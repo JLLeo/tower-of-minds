@@ -136,7 +136,13 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   }
 
   function answer(state: RunState, payload: unknown): RunState {
-    return applyInput(state, { type: 'intent_response', combatantId: GUARD, payload });
+    const request = state.encounter.intentRequest;
+    return applyInput(state, {
+      type: 'intent_response',
+      combatantId: GUARD,
+      requestedAtMs: request?.requestedAtMs ?? 0,
+      payload,
+    });
   }
 
   it('Run 一开始就挂出一个 IntentRequest', () => {
@@ -240,8 +246,39 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   it('回答一个没有在等的 Combatant 不改变状态', () => {
     const state = fresh();
     expect(
-      applyInput(state, { type: 'intent_response', combatantId: '不存在', payload: {} }),
+      applyInput(state, {
+        type: 'intent_response',
+        combatantId: '不存在',
+        requestedAtMs: 0,
+        payload: {},
+      }),
     ).toBe(state);
+  });
+
+  it('超时回退之后迟到的响应会被丢掉，不会顶掉下一回合的 Intent', () => {
+    const waiting = fresh();
+    const stale = waiting.encounter.intentRequest!;
+
+    // 先超时，引擎替它选
+    const expired = applyInput(waiting, { type: 'tick', atMs: stale.timeoutMs });
+    expect(expired.encounter.combatants[0]?.intent?.source).toBe('fallback');
+
+    // 打完这一回合，新回合挂出一次新的请求
+    const nextTurn = applyInput(expired, { type: 'end_turn', atMs: 9000 });
+    const currentRequest = nextTurn.encounter.intentRequest;
+    expect(currentRequest?.requestedAtMs).toBe(9000);
+
+    // 那次早已超时的提问现在才回来：它看的是上一回合的战况，必须被丢掉
+    const late = applyInput(nextTurn, {
+      type: 'intent_response',
+      combatantId: GUARD,
+      requestedAtMs: stale.requestedAtMs,
+      payload: { actionId: 'crush', line: '迟到的杀意。' },
+    });
+
+    expect(late).toBe(nextTurn);
+    expect(late.encounter.intentRequest).toEqual(currentRequest);
+    expect(late.encounter.combatants[0]?.intent).toBeNull();
   });
 
   it('行动之后会为新回合重新挂出请求', () => {

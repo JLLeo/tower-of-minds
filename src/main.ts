@@ -16,8 +16,8 @@ let state: RunState = startRun(BUILT_IN_GENERATION, Date.now(), {
   startedAtMs: performance.now(),
 });
 
-/** 已经发出去、还没回来的那个请求。用请求的时刻做键，避免重复提问。 */
-let inFlight: string | null = null;
+/** 正在飞的那次提问。请求的时刻就是它的身份。 */
+let inFlight: { key: string; controller: AbortController } | null = null;
 
 function paint(): void {
   render(root!, state, dispatch, restart);
@@ -36,29 +36,44 @@ function dispatch(input: PlayerInput): void {
 /**
  * 引擎挂出 IntentRequest 时去问模型，把响应原样交回引擎。
  * 网络失败也照样交回去（payload 为 null），引擎会判非法并回退——Run 不会停。
+ *
+ * 响应带着它所回答的那次请求的时刻。引擎超时回退之后，迟到的回答会被认出来并
+ * 丢掉；这里也顺手把它 abort 掉，不让它白白占着连接。
  */
 function askForIntent(): void {
   const request = state.encounter.intentRequest;
-  if (!request) {
-    inFlight = null;
-    return;
-  }
+  const key = request ? `${request.combatantId}@${request.requestedAtMs}` : null;
 
-  const key = `${request.combatantId}@${request.requestedAtMs}`;
-  if (inFlight === key) return;
-  inFlight = key;
+  if (inFlight && inFlight.key !== key) {
+    inFlight.controller.abort();
+    inFlight = null;
+  }
+  if (!request || !key || inFlight) return;
 
   const combatant = state.encounter.combatants.find((c) => c.id === request.combatantId);
   if (!combatant) return;
 
   const controller = new AbortController();
+  inFlight = { key, controller };
+
   provider
     .requestIntent(contextFor(state, combatant), controller.signal)
     .then((payload) => {
-      dispatch({ type: 'intent_response', combatantId: request.combatantId, payload });
+      dispatch({
+        type: 'intent_response',
+        combatantId: request.combatantId,
+        requestedAtMs: request.requestedAtMs,
+        payload,
+      });
     })
     .catch(() => {
-      dispatch({ type: 'intent_response', combatantId: request.combatantId, payload: null });
+      if (controller.signal.aborted) return;
+      dispatch({
+        type: 'intent_response',
+        combatantId: request.combatantId,
+        requestedAtMs: request.requestedAtMs,
+        payload: null,
+      });
     });
 }
 
@@ -71,8 +86,9 @@ setInterval(() => {
 }, 200);
 
 function restart(): void {
-  state = startRun(BUILT_IN_GENERATION, Date.now(), { startedAtMs: performance.now() });
+  inFlight?.controller.abort();
   inFlight = null;
+  state = startRun(BUILT_IN_GENERATION, Date.now(), { startedAtMs: performance.now() });
   paint();
   askForIntent();
 }
