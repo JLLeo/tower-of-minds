@@ -67,7 +67,6 @@ export function startRun(
   return {
     seed,
     rng,
-    cards: CARD_POOL,
     floor: 1,
     phase: 'in_encounter',
     encounter,
@@ -85,7 +84,9 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
     case 'end_turn':
       return endTurn(state);
     case 'execution_input':
-      return resumeExecution(state, input.atMs);
+      return resolvePending(state, input.atMs);
+    case 'tick':
+      return expireIfWindowClosed(state, input.atMs);
   }
 }
 
@@ -96,7 +97,7 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
  * #5 的节奏连击与蓄力沿用同一套分档，只换窗口长度与操作方式。
  */
 export const PERFECT_BAND = { start: 0.7, end: 0.85 } as const;
-export const GOOD_BAND_START = 0.45;
+export const GOOD_BAND = { start: 0.45, end: 1 } as const;
 
 /** Miss 只是打折，不反噬。 */
 export const GRADE_MULTIPLIER: Record<ExecutionGrade, number> = {
@@ -105,33 +106,29 @@ export const GRADE_MULTIPLIER: Record<ExecutionGrade, number> = {
   perfect: 1.5,
 };
 
-const GRADE_LABEL: Record<ExecutionGrade, string> = {
+export const GRADE_LABEL: Record<ExecutionGrade, string> = {
   miss: '失手',
   good: '还行',
   perfect: '完美',
 };
 
 /**
- * 把输入时刻在窗口里的位置换成档位。窗口外（太早、或者根本没按）都算 Miss。
- * 计算归引擎，UI 只上报玩家按下的时刻。
+ * 把输入时刻在窗口里的位置换成档位。窗口外——太早，或者拖到窗口耗尽——都算 Miss。
+ * 计算归引擎，UI 只上报时刻。
  */
-export function gradeFor(spec: ExecutionSpec, elapsedMs: number): ExecutionGrade {
-  const progress = elapsedMs / spec.windowMs;
+function gradeFor(spec: ExecutionSpec, elapsedMs: number): ExecutionGrade {
+  const progress = Math.max(0, elapsedMs) / spec.windowMs;
   if (progress >= PERFECT_BAND.start && progress < PERFECT_BAND.end) return 'perfect';
-  if (progress >= GOOD_BAND_START && progress < 1) return 'good';
+  if (progress >= GOOD_BAND.start && progress < GOOD_BAND.end) return 'good';
   return 'miss';
 }
 
 function scaleEffects(effects: readonly Effect[], multiplier: number): readonly Effect[] {
   if (multiplier === 1) return effects;
-  return effects.map((effect) => {
-    switch (effect.kind) {
-      case 'gain_block':
-        return { ...effect, amount: Math.round(effect.amount * multiplier) };
-      case 'damage':
-        return { ...effect, amount: Math.round(effect.amount * multiplier) };
-    }
-  });
+  return effects.map((effect) => ({
+    ...effect,
+    amount: Math.round(effect.amount * multiplier),
+  }));
 }
 
 // ---------------------------------------------------------------- 只读查询
@@ -143,7 +140,7 @@ export function definitionOf(state: RunState, instanceId: string): CardDefinitio
     state.encounter.player.drawPile.find((c) => c.instanceId === instanceId) ??
     state.encounter.player.discardPile.find((c) => c.instanceId === instanceId);
   if (!card) return undefined;
-  return state.cards.find((d) => d.id === card.definitionId);
+  return CARD_POOL.find((d) => d.id === card.definitionId);
 }
 
 /** 现在是否轮到玩家出牌。 */
@@ -262,7 +259,7 @@ function takeHit(combatant: CombatantState, amount: number): CombatantState {
 
 // ---------------------------------------------------------------- 结算挂起的恢复
 
-function resumeExecution(state: RunState, atMs: number): RunState {
+function resolvePending(state: RunState, atMs: number): RunState {
   const encounter = state.encounter;
   const pending = encounter.pending;
   if (encounter.phase !== 'awaiting_execution' || !pending) return state;
@@ -272,10 +269,21 @@ function resumeExecution(state: RunState, atMs: number): RunState {
 
   const resumed: RunState = {
     ...state,
-    journal: [...state.journal, `格挡时机：${GRADE_LABEL[grade]}（×${multiplier}）。`],
+    journal: [...state.journal, `判定：${GRADE_LABEL[grade]}（×${multiplier}）。`],
     encounter: { ...encounter, phase: 'player_turn', pending: null, lastGrade: grade },
   };
   return checkOutcome(applyEffects(resumed, scaleEffects(pending.remainingEffects, multiplier)));
+}
+
+/**
+ * 窗口耗尽而玩家始终没有按下：结算照常推进，档位自然落在 Miss。
+ * 窗口没走完就原样返回同一个对象——调用方据此跳过重绘，每帧上报才不昂贵。
+ */
+function expireIfWindowClosed(state: RunState, atMs: number): RunState {
+  const pending = state.encounter.pending;
+  if (state.encounter.phase !== 'awaiting_execution' || !pending) return state;
+  if (atMs - pending.openedAtMs < pending.spec.windowMs) return state;
+  return resolvePending(state, atMs);
 }
 
 // ---------------------------------------------------------------- 回合推进

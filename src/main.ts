@@ -14,7 +14,10 @@ function paint(): void {
 }
 
 function dispatch(input: PlayerInput): void {
-  state = applyInput(state, input);
+  const next = applyInput(state, input);
+  // 引擎在无事发生时原样返回同一个对象——时机条每帧上报时刻，靠这一步才不昂贵。
+  if (next === state) return;
+  state = next;
   paint();
 }
 

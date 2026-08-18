@@ -111,8 +111,6 @@ export type RunOutcome = 'victory' | 'defeat';
 export interface RunState {
   readonly seed: number;
   readonly rng: Rng;
-  /** 本 Run 使用的卡池。放在状态里，applyInput 才能是纯粹的 (state, input) => state。 */
-  readonly cards: readonly CardDefinition[];
   readonly floor: number;
   readonly phase: RunPhase;
   readonly encounter: EncounterState;
@@ -134,7 +132,13 @@ export type PlayerInput =
       readonly targetId?: string;
     }
   | { readonly type: 'end_turn' }
-  | { readonly type: 'execution_input'; readonly atMs: number };
+  | { readonly type: 'execution_input'; readonly atMs: number }
+  /**
+   * 时间的流逝。UI 每帧上报当前时刻，引擎据此判断判定窗口是否已经耗尽——
+   * 「玩家完全不按」因此是引擎的规则，而不是渲染层的决定。
+   * 没有任何变化时 applyInput 原样返回同一个对象，调用方可以据此跳过重绘。
+   */
+  | { readonly type: 'tick'; readonly atMs: number };
 
 // ---------------------------------------------------------------- Generation
 

@@ -1,17 +1,12 @@
 import {
-  GOOD_BAND_START,
+  GOOD_BAND,
+  GRADE_LABEL,
   PERFECT_BAND,
   canPlay,
   definitionOf,
   isPlayerActing,
 } from '../engine/run.js';
-import type {
-  CardDefinition,
-  ExecutionGrade,
-  PendingExecution,
-  PlayerInput,
-  RunState,
-} from '../engine/types.js';
+import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
 export type Dispatch = (input: PlayerInput) => void;
 
@@ -20,8 +15,9 @@ let stopTimingBar: (() => void) | null = null;
 
 /**
  * 把 RunState 画出来。渲染层不持有游戏状态，也不推导规则——需要判断的地方
- * 一律问 engine 导出的查询函数。判定档位同样由引擎算：这里只负责把窗口画出来，
- * 并把玩家按下的时刻报回去。
+ * 一律问 engine 导出的查询函数。判定档位、窗口是否耗尽同样由引擎判断：这里只负责
+ * 把窗口画出来，并把时刻报回去。UI 里没有未被测试的规则，这是单一 seam 能覆盖
+ * 全部行为的前提。
  */
 export function render(
   root: HTMLElement,
@@ -44,7 +40,11 @@ export function render(
 
   const pending = state.encounter.pending;
   if (state.encounter.phase === 'awaiting_execution' && pending) {
-    stopTimingBar = runTimingBar(root, pending, dispatch);
+    const track = root.querySelector<HTMLElement>('.timing-track');
+    const indicator = root.querySelector<HTMLElement>('.timing-indicator');
+    if (track && indicator) {
+      stopTimingBar = runTimingBar({ root, track, indicator }, pending, dispatch);
+    }
   }
 }
 
@@ -130,80 +130,80 @@ function handView(state: RunState, dispatch: Dispatch): HTMLElement {
   return section;
 }
 
-const GRADE_TEXT: Record<ExecutionGrade, string> = {
-  miss: '失手',
-  good: '还行',
-  perfect: '完美',
-};
-
-/**
- * 时机条：轨道代表整个判定窗口，高亮区是 Perfect 带。指示器扫过轨道，
- * 玩家按空格或点击轨道来定格。窗口走完仍未按下就自动交卷（引擎判为 Miss）。
- * 分档位置直接读引擎导出的常量，避免 UI 和规则各写一份。
- */
-function timingBar(): HTMLElement {
-  const wrap = el('section', 'timing');
-  wrap.appendChild(el('div', 'timing-hint', '按 空格 定格'));
-
-  const track = el('div', 'timing-track');
-
-  const good = el('div', 'timing-zone timing-good');
-  good.style.left = `${GOOD_BAND_START * 100}%`;
-  good.style.width = `${(1 - GOOD_BAND_START) * 100}%`;
-  track.appendChild(good);
-
-  const perfect = el('div', 'timing-zone timing-perfect');
-  perfect.style.left = `${PERFECT_BAND.start * 100}%`;
-  perfect.style.width = `${(PERFECT_BAND.end - PERFECT_BAND.start) * 100}%`;
-  track.appendChild(perfect);
-
-  track.appendChild(el('div', 'timing-indicator'));
-  wrap.appendChild(track);
-  return wrap;
+interface TimingBar {
+  readonly root: HTMLElement;
+  readonly track: HTMLElement;
+  readonly indicator: HTMLElement;
 }
 
+function zone(band: { readonly start: number; readonly end: number }, className: string): HTMLElement {
+  const node = el('div', `timing-zone ${className}`);
+  node.style.left = `${band.start * 100}%`;
+  node.style.width = `${(band.end - band.start) * 100}%`;
+  return node;
+}
+
+/**
+ * 时机条：轨道代表整个判定窗口，高亮区是 Perfect 带。分档位置直接读引擎导出的
+ * 常量，UI 和规则不各写一份。
+ */
+function timingBar(): TimingBar {
+  const root = el('section', 'timing');
+  root.appendChild(el('div', 'timing-hint', '按 空格 定格'));
+
+  const track = el('div', 'timing-track');
+  track.appendChild(zone(GOOD_BAND, 'timing-good'));
+  track.appendChild(zone(PERFECT_BAND, 'timing-perfect'));
+
+  const indicator = el('div', 'timing-indicator');
+  track.appendChild(indicator);
+  root.appendChild(track);
+  return { root, track, indicator };
+}
+
+/**
+ * 驱动时机条。这里只做两件事：把指示器画到当前位置，以及每帧把当前时刻上报给
+ * 引擎。窗口有没有走完、走完了算什么档位，全部由引擎判断——UI 不做规则决定。
+ * 标签页被切走时 rAF 暂停、tick 停发，窗口也就不会在玩家看不见的时候悄悄耗尽。
+ */
 function runTimingBar(
-  root: HTMLElement,
+  bar: TimingBar,
   pending: PendingExecution,
   dispatch: Dispatch,
 ): () => void {
-  const indicator = root.querySelector<HTMLElement>('.timing-indicator');
-  const track = root.querySelector<HTMLElement>('.timing-track');
-  if (!indicator || !track) return () => {};
-
-  let settled = false;
+  let stopped = false;
   let frame = 0;
 
-  const submit = (): void => {
-    if (settled) return;
-    settled = true;
+  const press = (): void => {
+    if (stopped) return;
     dispatch({ type: 'execution_input', atMs: performance.now() });
   };
 
   const onKey = (event: KeyboardEvent): void => {
     if (event.code !== 'Space' && event.code !== 'Enter') return;
     event.preventDefault();
-    submit();
+    press();
   };
 
-  const tick = (): void => {
-    const progress = (performance.now() - pending.openedAtMs) / pending.spec.windowMs;
-    indicator.style.left = `${Math.max(0, Math.min(100, progress * 100))}%`;
-    if (progress >= 1) {
-      submit();
-      return;
-    }
-    frame = requestAnimationFrame(tick);
+  const frameStep = (): void => {
+    if (stopped) return;
+    const now = performance.now();
+    const progress = (now - pending.openedAtMs) / pending.spec.windowMs;
+    bar.indicator.style.left = `${Math.max(0, Math.min(100, progress * 100))}%`;
+    dispatch({ type: 'tick', atMs: now });
+    if (stopped) return;
+    frame = requestAnimationFrame(frameStep);
   };
 
   window.addEventListener('keydown', onKey);
-  track.addEventListener('click', submit);
-  frame = requestAnimationFrame(tick);
+  bar.track.addEventListener('click', press);
+  frame = requestAnimationFrame(frameStep);
 
   return () => {
-    settled = true;
+    stopped = true;
     cancelAnimationFrame(frame);
     window.removeEventListener('keydown', onKey);
+    bar.track.removeEventListener('click', press);
   };
 }
 
@@ -211,12 +211,12 @@ function controls(state: RunState, dispatch: Dispatch): HTMLElement {
   const section = el('section', 'controls');
 
   if (state.encounter.phase === 'awaiting_execution') {
-    section.appendChild(timingBar());
+    section.appendChild(timingBar().root);
     return section;
   }
 
   const grade = state.encounter.lastGrade;
-  if (grade) section.appendChild(el('div', `grade grade-${grade}`, GRADE_TEXT[grade]));
+  if (grade) section.appendChild(el('div', `grade grade-${grade}`, GRADE_LABEL[grade]));
 
   const endTurn = document.createElement('button');
   endTurn.className = 'primary';

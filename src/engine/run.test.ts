@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GRADE_MULTIPLIER, applyInput, canPlay, definitionOf, gradeFor, startRun } from './run.js';
+import { applyInput, canPlay, definitionOf, startRun } from './run.js';
 import { BUILT_IN_GENERATION, STARTING_DECK } from './content.js';
 import type { PlayerInput, RunOptions, RunState } from './types.js';
 
@@ -234,40 +234,25 @@ describe('Execution Check：挂起与恢复（ADR-0002）', () => {
 });
 
 describe('Execution Check：档位与倍率', () => {
-  const spec = { windowMs: 1000 };
-
-  it('按窗口内的位置分出三档', () => {
-    expect(gradeFor(spec, 100)).toBe('miss'); // 太早
-    expect(gradeFor(spec, 500)).toBe('good');
-    expect(gradeFor(spec, 750)).toBe('perfect');
-    expect(gradeFor(spec, 900)).toBe('good'); // 过了完美区但还在窗口内
-    expect(gradeFor(spec, 1200)).toBe('miss'); // 窗口外
-  });
-
-  it('完全不按等同于窗口耗尽，算 Miss', () => {
-    expect(gradeFor(spec, spec.windowMs)).toBe('miss');
-  });
-
-  it('Miss 只是打折，仍然给出格挡', () => {
-    expect(GRADE_MULTIPLIER.miss).toBeGreaterThan(0);
-    expect(GRADE_MULTIPLIER.miss).toBeLessThan(GRADE_MULTIPLIER.good);
-  });
-
-  function blockAfter(progress: number): RunState {
-    const state = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
-    const card = state.encounter.player.hand[0];
-    const suspended = applyInput(state, {
+  function blockAfter(inputs: (state: RunState) => readonly PlayerInput[]): RunState {
+    const start = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
+    const card = start.encounter.player.hand[0];
+    const suspended = applyInput(start, {
       type: 'play_card',
       instanceId: card!.instanceId,
       atMs: 0,
     });
-    return applyInput(suspended, pressAt(suspended, progress));
+    let state = suspended;
+    for (const input of inputs(suspended)) state = applyInput(state, input);
+    return state;
   }
 
+  const pressedAt = (progress: number) => (state: RunState) => [pressAt(state, progress)];
+
   it('三档对格挡强度的影响各不相同', () => {
-    const miss = blockAfter(0.1);
-    const good = blockAfter(0.5);
-    const perfect = blockAfter(0.75);
+    const miss = blockAfter(pressedAt(0.1));
+    const good = blockAfter(pressedAt(0.5));
+    const perfect = blockAfter(pressedAt(0.75));
 
     expect(miss.encounter.lastGrade).toBe('miss');
     expect(good.encounter.lastGrade).toBe('good');
@@ -277,14 +262,54 @@ describe('Execution Check：档位与倍率', () => {
     expect(miss.encounter.player.block).toBe(3);
     expect(good.encounter.player.block).toBe(5);
     expect(perfect.encounter.player.block).toBe(8);
-    expect(miss.encounter.player.block).toBeGreaterThan(0);
   });
 
-  it('窗口耗尽（完全不按）仍然结算，只是按 Miss 打折', () => {
-    const expired = blockAfter(1.5);
+  it('Miss 只是打折，仍然给出格挡而不是反噬', () => {
+    const miss = blockAfter(pressedAt(0.1));
+    const good = blockAfter(pressedAt(0.5));
+
+    expect(miss.encounter.player.block).toBeGreaterThan(0);
+    expect(miss.encounter.player.block).toBeLessThan(good.encounter.player.block);
+    expect(miss.encounter.player.hp).toBe(good.encounter.player.hp);
+  });
+
+  it('完全不按：窗口耗尽后结算照常推进，判为 Miss', () => {
+    const expired = blockAfter((state) => {
+      const pending = state.encounter.pending!;
+      // 只有时间在流逝，没有任何 execution_input
+      return [
+        { type: 'tick', atMs: pending.openedAtMs + pending.spec.windowMs * 0.5 },
+        { type: 'tick', atMs: pending.openedAtMs + pending.spec.windowMs },
+      ];
+    });
 
     expect(expired.encounter.phase).toBe('player_turn');
+    expect(expired.encounter.pending).toBeNull();
     expect(expired.encounter.lastGrade).toBe('miss');
     expect(expired.encounter.player.block).toBe(3);
+  });
+
+  it('窗口还没走完时 tick 不改变任何东西', () => {
+    const start = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
+    const card = start.encounter.player.hand[0];
+    const suspended = applyInput(start, {
+      type: 'play_card',
+      instanceId: card!.instanceId,
+      atMs: 0,
+    });
+    const pending = suspended.encounter.pending!;
+
+    const ticked = applyInput(suspended, {
+      type: 'tick',
+      atMs: pending.openedAtMs + pending.spec.windowMs * 0.5,
+    });
+
+    // 原样返回同一个对象，调用方据此跳过重绘
+    expect(ticked).toBe(suspended);
+  });
+
+  it('没有挂起结算时 tick 是空操作', () => {
+    const state = startRun(BUILT_IN_GENERATION, SEED);
+    expect(applyInput(state, { type: 'tick', atMs: 9999 })).toBe(state);
   });
 });
