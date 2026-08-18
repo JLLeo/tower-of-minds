@@ -14,6 +14,9 @@ export interface ExecutionSpec {
   readonly windowMs: number;
 }
 
+/** 一次 Execution Check 的结果档位。Miss 只是打折，不反噬。 */
+export type ExecutionGrade = 'miss' | 'good' | 'perfect';
+
 export interface CardDefinition {
   readonly id: string;
   readonly name: string;
@@ -98,6 +101,8 @@ export interface EncounterState {
   readonly pending: PendingExecution | null;
   /** ADR-0002：每回合最多触发一次 Execution Check。 */
   readonly executionUsedThisTurn: boolean;
+  /** 本回合最近一次判定的结果，供界面当场反馈。新回合清空。 */
+  readonly lastGrade: ExecutionGrade | null;
 }
 
 export type RunPhase = 'in_encounter' | 'ended';
@@ -141,8 +146,10 @@ export interface Generation {
   readonly title: string;
 }
 
-/** 测试用的替身：替换卡池与起始 Deck。真实游戏不传。 */
+/**
+ * 测试用的替身：指定一副确定的起始 Deck，好让场景可复现。真实游戏不传。
+ * 卡池本身不可替换——卡池、数值与判定窗口在所有 Run 中保持一致。
+ */
 export interface RunOptions {
-  readonly cards?: readonly CardDefinition[];
   readonly startingDeck?: readonly string[];
 }

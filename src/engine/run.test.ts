@@ -1,35 +1,49 @@
 import { describe, expect, it } from 'vitest';
-import { applyInput, canPlay, definitionOf, startRun } from './run.js';
-import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
-import type { CardDefinition, PlayerInput, RunState } from './types.js';
+import { GRADE_MULTIPLIER, applyInput, canPlay, definitionOf, gradeFor, startRun } from './run.js';
+import { BUILT_IN_GENERATION, STARTING_DECK } from './content.js';
+import type { PlayerInput, RunOptions, RunState } from './types.js';
 
 const SEED = 20260818;
 
-/** 脚本化的输入时刻：真人按键的替身，每次输入推进一点。 */
+const ALL_GUARDS: RunOptions = { startingDeck: Array.from({ length: 10 }, () => 'guard') };
+const ALL_STRIKES: RunOptions = { startingDeck: Array.from({ length: 10 }, () => 'strike') };
+
+/** 脚本化的输入时刻：真人按键的替身。 */
 function clock(): () => number {
   let now = 0;
   return () => (now += 100);
 }
 
-/** 贪心策略：能打就打第一张打得出的牌，打不动就结束回合。用于生成一串输入。 */
+/** 在窗口里的某个相对位置按下。0.75 落在 Perfect 区，0.2 落在窗口太早的一侧。 */
+function pressAt(state: RunState, progress: number): PlayerInput {
+  const pending = state.encounter.pending;
+  if (!pending) throw new Error('没有挂起的结算');
+  return { type: 'execution_input', atMs: pending.openedAtMs + pending.spec.windowMs * progress };
+}
+
+/** 贪心策略：能打就打，挂起就用完美时机接上，打不动就结束回合。 */
 function scriptInputs(start: RunState, maxSteps = 500): PlayerInput[] {
   const at = clock();
   let state = start;
   const inputs: PlayerInput[] = [];
 
   for (let i = 0; i < maxSteps && state.phase === 'in_encounter'; i++) {
-    if (state.encounter.phase !== 'player_turn') break;
-    const playable = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-    const input: PlayerInput = playable
-      ? { type: 'play_card', instanceId: playable.instanceId, atMs: at() }
-      : { type: 'end_turn' };
+    let input: PlayerInput;
+    if (state.encounter.phase === 'awaiting_execution') {
+      input = pressAt(state, 0.75);
+    } else {
+      const playable = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
+      input = playable
+        ? { type: 'play_card', instanceId: playable.instanceId, atMs: at() }
+        : { type: 'end_turn' };
+    }
     inputs.push(input);
     state = applyInput(state, input);
   }
   return inputs;
 }
 
-function run(inputs: readonly PlayerInput[], options?: Parameters<typeof startRun>[2]): RunState {
+function run(inputs: readonly PlayerInput[], options?: RunOptions): RunState {
   let state = startRun(BUILT_IN_GENERATION, SEED, options);
   for (const input of inputs) state = applyInput(state, input);
   return state;
@@ -57,17 +71,12 @@ describe('startRun', () => {
 
 describe('Card 循环', () => {
   it('打出一张牌会扣能量、离开手牌、进入弃牌堆', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED);
+    const state = startRun(BUILT_IN_GENERATION, SEED, ALL_STRIKES);
     const card = state.encounter.player.hand[0];
-    expect(card).toBeDefined();
     const definition = definitionOf(state, card!.instanceId);
     expect(definition).toBeDefined();
 
-    const next = applyInput(state, {
-      type: 'play_card',
-      instanceId: card!.instanceId,
-      atMs: 100,
-    });
+    const next = applyInput(state, { type: 'play_card', instanceId: card!.instanceId, atMs: 100 });
 
     expect(next.encounter.player.hand).toHaveLength(4);
     expect(next.encounter.player.discardPile.map((c) => c.instanceId)).toContain(card!.instanceId);
@@ -75,20 +84,19 @@ describe('Card 循环', () => {
   });
 
   it('能量不够时打牌不改变状态', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED);
+    let state = startRun(BUILT_IN_GENERATION, SEED, ALL_STRIKES);
     const at = clock();
-    while (state.encounter.phase === 'player_turn') {
+    for (let i = 0; i < 3; i++) {
       const playable = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-      if (!playable) break;
       state = applyInput(state, {
         type: 'play_card',
-        instanceId: playable.instanceId,
+        instanceId: playable!.instanceId,
         atMs: at(),
       });
     }
 
+    expect(state.encounter.player.energy).toBe(0);
     const leftover = state.encounter.player.hand[0];
-    expect(leftover).toBeDefined();
     expect(canPlay(state, leftover!.instanceId)).toBe(false);
     expect(
       applyInput(state, { type: 'play_card', instanceId: leftover!.instanceId, atMs: at() }),
@@ -136,12 +144,10 @@ describe('脚本化对手', () => {
 
 describe('完整一场', () => {
   it('用固定 seed 与一串脚本化输入跑到 Run 结束并取胜', () => {
-    const inputs = scriptInputs(startRun(BUILT_IN_GENERATION, SEED));
-    const state = run(inputs);
+    const state = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
 
     expect(state.phase).toBe('ended');
     expect(state.outcome).toBe('victory');
-    expect(state.encounter.phase).toBe('ended');
     expect(state.encounter.combatants.every((c) => c.hp <= 0)).toBe(true);
     expect(state.encounter.player.hp).toBeGreaterThan(0);
   });
@@ -157,44 +163,20 @@ describe('完整一场', () => {
   });
 });
 
-describe('结算挂起（ADR-0002）', () => {
-  const timingShield: CardDefinition = {
-    id: 'timing-guard',
-    name: '时机格挡',
-    type: 'shield',
-    cost: 1,
-    block: 8,
-    execution: { windowMs: 900 },
-  };
-  const options = {
-    cards: [...CARD_POOL, timingShield],
-    startingDeck: Array.from({ length: 10 }, () => timingShield.id),
-  };
-
+describe('Execution Check：挂起与恢复（ADR-0002）', () => {
   function suspended(): RunState {
-    const state = startRun(BUILT_IN_GENERATION, SEED, options);
+    const state = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
     const card = state.encounter.player.hand[0];
     return applyInput(state, { type: 'play_card', instanceId: card!.instanceId, atMs: 100 });
   }
 
-  it('打出需要实时输入的 Card 会把结算挂起，并记下窗口开启的时刻', () => {
+  it('打出盾牌类 Card 会挂起结算，并记下窗口开启的时刻', () => {
     const state = suspended();
 
     expect(state.encounter.phase).toBe('awaiting_execution');
-    expect(state.encounter.pending?.spec.windowMs).toBe(900);
     expect(state.encounter.pending?.openedAtMs).toBe(100);
+    expect(state.encounter.pending?.spec.windowMs).toBe(900);
     expect(state.encounter.player.block).toBe(0); // 效果尚未落地
-  });
-
-  it('输入时刻能被引擎定位进窗口', () => {
-    const resumed = applyInput(suspended(), { type: 'execution_input', atMs: 420 });
-
-    // 判定窗口到 Execution Grade 的计算归引擎（#3 落地倍率），这里先验证
-    // 时刻确实到得了引擎手里：420 - 100 = 320。
-    expect(resumed.journal.at(-1)).toBe('窗口开启后 320ms 完成输入。');
-    expect(resumed.encounter.phase).toBe('player_turn');
-    expect(resumed.encounter.pending).toBeNull();
-    expect(resumed.encounter.player.block).toBe(8);
   });
 
   it('挂起状态可以序列化、还原并继续推进', () => {
@@ -202,8 +184,8 @@ describe('结算挂起（ADR-0002）', () => {
     const restored = JSON.parse(JSON.stringify(state)) as RunState;
 
     expect(restored).toEqual(state);
-    expect(applyInput(restored, { type: 'execution_input', atMs: 420 })).toEqual(
-      applyInput(state, { type: 'execution_input', atMs: 420 }),
+    expect(applyInput(restored, pressAt(state, 0.75))).toEqual(
+      applyInput(state, pressAt(state, 0.75)),
     );
   });
 
@@ -217,7 +199,7 @@ describe('结算挂起（ADR-0002）', () => {
   });
 
   it('每回合只挂起一次，同回合的后续 Card 直接结算', () => {
-    const resumed = applyInput(suspended(), { type: 'execution_input', atMs: 420 });
+    const resumed = applyInput(suspended(), pressAt(suspended(), 0.75));
     expect(resumed.encounter.executionUsedThisTurn).toBe(true);
 
     const second = resumed.encounter.player.hand[0];
@@ -229,22 +211,80 @@ describe('结算挂起（ADR-0002）', () => {
 
     expect(next.encounter.phase).toBe('player_turn');
     expect(next.encounter.pending).toBeNull();
-    expect(next.encounter.player.block).toBe(16); // 8 + 8，第二张直接落地
+    // 第一张完美 8 点，第二张不再判定、按原值 5 点
+    expect(next.encounter.player.block).toBe(13);
   });
 
   it('新回合重新允许一次挂起', () => {
-    const resumed = applyInput(suspended(), { type: 'execution_input', atMs: 420 });
+    const resumed = applyInput(suspended(), pressAt(suspended(), 0.75));
     const nextTurn = applyInput(resumed, { type: 'end_turn' });
     expect(nextTurn.encounter.executionUsedThisTurn).toBe(false);
+    expect(nextTurn.encounter.lastGrade).toBeNull();
 
     const card = nextTurn.encounter.player.hand[0];
     const next = applyInput(nextTurn, {
       type: 'play_card',
       instanceId: card!.instanceId,
-      atMs: 900,
+      atMs: 5000,
     });
 
     expect(next.encounter.phase).toBe('awaiting_execution');
-    expect(next.encounter.pending?.openedAtMs).toBe(900);
+    expect(next.encounter.pending?.openedAtMs).toBe(5000);
+  });
+});
+
+describe('Execution Check：档位与倍率', () => {
+  const spec = { windowMs: 1000 };
+
+  it('按窗口内的位置分出三档', () => {
+    expect(gradeFor(spec, 100)).toBe('miss'); // 太早
+    expect(gradeFor(spec, 500)).toBe('good');
+    expect(gradeFor(spec, 750)).toBe('perfect');
+    expect(gradeFor(spec, 900)).toBe('good'); // 过了完美区但还在窗口内
+    expect(gradeFor(spec, 1200)).toBe('miss'); // 窗口外
+  });
+
+  it('完全不按等同于窗口耗尽，算 Miss', () => {
+    expect(gradeFor(spec, spec.windowMs)).toBe('miss');
+  });
+
+  it('Miss 只是打折，仍然给出格挡', () => {
+    expect(GRADE_MULTIPLIER.miss).toBeGreaterThan(0);
+    expect(GRADE_MULTIPLIER.miss).toBeLessThan(GRADE_MULTIPLIER.good);
+  });
+
+  function blockAfter(progress: number): RunState {
+    const state = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
+    const card = state.encounter.player.hand[0];
+    const suspended = applyInput(state, {
+      type: 'play_card',
+      instanceId: card!.instanceId,
+      atMs: 0,
+    });
+    return applyInput(suspended, pressAt(suspended, progress));
+  }
+
+  it('三档对格挡强度的影响各不相同', () => {
+    const miss = blockAfter(0.1);
+    const good = blockAfter(0.5);
+    const perfect = blockAfter(0.75);
+
+    expect(miss.encounter.lastGrade).toBe('miss');
+    expect(good.encounter.lastGrade).toBe('good');
+    expect(perfect.encounter.lastGrade).toBe('perfect');
+
+    // 基础格挡 5：失手 3、还行 5、完美 8
+    expect(miss.encounter.player.block).toBe(3);
+    expect(good.encounter.player.block).toBe(5);
+    expect(perfect.encounter.player.block).toBe(8);
+    expect(miss.encounter.player.block).toBeGreaterThan(0);
+  });
+
+  it('窗口耗尽（完全不按）仍然结算，只是按 Miss 打折', () => {
+    const expired = blockAfter(1.5);
+
+    expect(expired.encounter.phase).toBe('player_turn');
+    expect(expired.encounter.lastGrade).toBe('miss');
+    expect(expired.encounter.player.block).toBe(3);
   });
 });

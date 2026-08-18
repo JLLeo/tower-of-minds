@@ -200,3 +200,73 @@ button.primary:disabled {
 .outcome h2 {
   margin: 0 0 12px;
 }
+
+/* Execution Check 的时机条 */
+.timing {
+  width: 100%;
+}
+
+.timing-hint {
+  font-size: 13px;
+  color: var(--accent);
+  margin-bottom: 8px;
+  letter-spacing: 0.08em;
+}
+
+.timing-track {
+  position: relative;
+  height: 26px;
+  background: #241f2c;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.timing-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.timing-good {
+  background: rgba(95, 134, 184, 0.28);
+}
+
+.timing-perfect {
+  background: rgba(201, 162, 39, 0.45);
+}
+
+.timing-indicator {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 3px;
+  margin-left: -1px;
+  background: var(--ink);
+  box-shadow: 0 0 8px rgba(232, 226, 239, 0.8);
+}
+
+.grade {
+  display: inline-block;
+  margin-right: 16px;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 14px;
+  letter-spacing: 0.1em;
+}
+
+.grade-perfect {
+  background: rgba(201, 162, 39, 0.2);
+  color: var(--accent);
+}
+
+.grade-good {
+  background: rgba(95, 134, 184, 0.2);
+  color: #79a6d2;
+}
+
+.grade-miss {
+  background: rgba(200, 67, 79, 0.18);
+  color: #d2797f;
+}

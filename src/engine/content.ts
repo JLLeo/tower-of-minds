@@ -6,7 +6,14 @@ import type { CardDefinition, CombatantState, Generation } from './types.js';
  */
 export const CARD_POOL: readonly CardDefinition[] = [
   { id: 'strike', name: '劈砍', type: 'attack', cost: 1, damage: 6 },
-  { id: 'guard', name: '格挡', type: 'shield', cost: 1, block: 5 },
+  {
+    id: 'guard',
+    name: '格挡',
+    type: 'shield',
+    cost: 1,
+    block: 5,
+    execution: { windowMs: 900 },
+  },
   { id: 'heavy', name: '重击', type: 'attack', cost: 2, damage: 10 },
 ];
 

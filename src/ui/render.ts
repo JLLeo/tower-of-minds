@@ -1,12 +1,27 @@
-import { canPlay, definitionOf, isPlayerActing } from '../engine/run.js';
-import type { CardDefinition, PlayerInput, RunState } from '../engine/types.js';
+import {
+  GOOD_BAND_START,
+  PERFECT_BAND,
+  canPlay,
+  definitionOf,
+  isPlayerActing,
+} from '../engine/run.js';
+import type {
+  CardDefinition,
+  ExecutionGrade,
+  PendingExecution,
+  PlayerInput,
+  RunState,
+} from '../engine/types.js';
 
 export type Dispatch = (input: PlayerInput) => void;
 
+/** 上一次渲染留下的时机条动画与按键监听，下一次渲染前必须先拆掉。 */
+let stopTimingBar: (() => void) | null = null;
+
 /**
  * 把 RunState 画出来。渲染层不持有游戏状态，也不推导规则——需要判断的地方
- * 一律问 engine 导出的查询函数（canPlay / isPlayerActing / definitionOf）。
- * 这是单一测试 seam 能覆盖全部行为的前提：UI 里没有未被测试的规则。
+ * 一律问 engine 导出的查询函数。判定档位同样由引擎算：这里只负责把窗口画出来，
+ * 并把玩家按下的时刻报回去。
  */
 export function render(
   root: HTMLElement,
@@ -14,6 +29,9 @@ export function render(
   dispatch: Dispatch,
   restart: () => void,
 ): void {
+  stopTimingBar?.();
+  stopTimingBar = null;
+
   root.replaceChildren(
     header(state),
     combatantsView(state),
@@ -23,6 +41,11 @@ export function render(
     journalView(state),
     ...(state.phase === 'ended' ? [outcomeView(state, restart)] : []),
   );
+
+  const pending = state.encounter.pending;
+  if (state.encounter.phase === 'awaiting_execution' && pending) {
+    stopTimingBar = runTimingBar(root, pending, dispatch);
+  }
 }
 
 function el(tag: string, className?: string, text?: string): HTMLElement {
@@ -82,6 +105,7 @@ function describe(definition: CardDefinition): string {
   const parts: string[] = [];
   if (definition.damage !== undefined) parts.push(`造成 ${definition.damage} 伤害`);
   if (definition.block !== undefined) parts.push(`获得 ${definition.block} 格挡`);
+  if (definition.execution) parts.push('需要时机判定');
   return parts.join('，');
 }
 
@@ -106,20 +130,93 @@ function handView(state: RunState, dispatch: Dispatch): HTMLElement {
   return section;
 }
 
+const GRADE_TEXT: Record<ExecutionGrade, string> = {
+  miss: '失手',
+  good: '还行',
+  perfect: '完美',
+};
+
+/**
+ * 时机条：轨道代表整个判定窗口，高亮区是 Perfect 带。指示器扫过轨道，
+ * 玩家按空格或点击轨道来定格。窗口走完仍未按下就自动交卷（引擎判为 Miss）。
+ * 分档位置直接读引擎导出的常量，避免 UI 和规则各写一份。
+ */
+function timingBar(): HTMLElement {
+  const wrap = el('section', 'timing');
+  wrap.appendChild(el('div', 'timing-hint', '按 空格 定格'));
+
+  const track = el('div', 'timing-track');
+
+  const good = el('div', 'timing-zone timing-good');
+  good.style.left = `${GOOD_BAND_START * 100}%`;
+  good.style.width = `${(1 - GOOD_BAND_START) * 100}%`;
+  track.appendChild(good);
+
+  const perfect = el('div', 'timing-zone timing-perfect');
+  perfect.style.left = `${PERFECT_BAND.start * 100}%`;
+  perfect.style.width = `${(PERFECT_BAND.end - PERFECT_BAND.start) * 100}%`;
+  track.appendChild(perfect);
+
+  track.appendChild(el('div', 'timing-indicator'));
+  wrap.appendChild(track);
+  return wrap;
+}
+
+function runTimingBar(
+  root: HTMLElement,
+  pending: PendingExecution,
+  dispatch: Dispatch,
+): () => void {
+  const indicator = root.querySelector<HTMLElement>('.timing-indicator');
+  const track = root.querySelector<HTMLElement>('.timing-track');
+  if (!indicator || !track) return () => {};
+
+  let settled = false;
+  let frame = 0;
+
+  const submit = (): void => {
+    if (settled) return;
+    settled = true;
+    dispatch({ type: 'execution_input', atMs: performance.now() });
+  };
+
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.code !== 'Space' && event.code !== 'Enter') return;
+    event.preventDefault();
+    submit();
+  };
+
+  const tick = (): void => {
+    const progress = (performance.now() - pending.openedAtMs) / pending.spec.windowMs;
+    indicator.style.left = `${Math.max(0, Math.min(100, progress * 100))}%`;
+    if (progress >= 1) {
+      submit();
+      return;
+    }
+    frame = requestAnimationFrame(tick);
+  };
+
+  window.addEventListener('keydown', onKey);
+  track.addEventListener('click', submit);
+  frame = requestAnimationFrame(tick);
+
+  return () => {
+    settled = true;
+    cancelAnimationFrame(frame);
+    window.removeEventListener('keydown', onKey);
+  };
+}
+
 function controls(state: RunState, dispatch: Dispatch): HTMLElement {
   const section = el('section', 'controls');
 
   if (state.encounter.phase === 'awaiting_execution') {
-    // #3 会在这里放格挡时机条。骨架阶段只给一个把输入时刻交给引擎的按钮。
-    const resume = document.createElement('button');
-    resume.className = 'primary';
-    resume.textContent = '继续结算';
-    resume.addEventListener('click', () =>
-      dispatch({ type: 'execution_input', atMs: performance.now() }),
-    );
-    section.appendChild(resume);
+    section.appendChild(timingBar());
     return section;
   }
+
+  const grade = state.encounter.lastGrade;
+  if (grade) section.appendChild(el('div', `grade grade-${grade}`, GRADE_TEXT[grade]));
 
   const endTurn = document.createElement('button');
   endTurn.className = 'primary';

@@ -13,6 +13,8 @@ import type {
   CombatantState,
   Effect,
   EncounterState,
+  ExecutionGrade,
+  ExecutionSpec,
   Generation,
   PlayerInput,
   PlayerState,
@@ -33,7 +35,6 @@ export function startRun(
   seed: number,
   options: RunOptions = {},
 ): RunState {
-  const cards = options.cards ?? CARD_POOL;
   const deckIds = options.startingDeck ?? STARTING_DECK;
   const deck: readonly CardInstance[] = deckIds.map((id, index) => ({
     instanceId: `${id}#${index}`,
@@ -60,12 +61,13 @@ export function startRun(
     combatants: floorOneCombatants(),
     pending: null,
     executionUsedThisTurn: false,
+    lastGrade: null,
   };
 
   return {
     seed,
     rng,
-    cards,
+    cards: CARD_POOL,
     floor: 1,
     phase: 'in_encounter',
     encounter,
@@ -85,6 +87,51 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
     case 'execution_input':
       return resumeExecution(state, input.atMs);
   }
+}
+
+// ---------------------------------------------------------------- Execution Check
+
+/**
+ * 判定窗口内的分档，按窗口长度的比例给出，与具体 Card Type 无关——
+ * #5 的节奏连击与蓄力沿用同一套分档，只换窗口长度与操作方式。
+ */
+export const PERFECT_BAND = { start: 0.7, end: 0.85 } as const;
+export const GOOD_BAND_START = 0.45;
+
+/** Miss 只是打折，不反噬。 */
+export const GRADE_MULTIPLIER: Record<ExecutionGrade, number> = {
+  miss: 0.5,
+  good: 1,
+  perfect: 1.5,
+};
+
+const GRADE_LABEL: Record<ExecutionGrade, string> = {
+  miss: '失手',
+  good: '还行',
+  perfect: '完美',
+};
+
+/**
+ * 把输入时刻在窗口里的位置换成档位。窗口外（太早、或者根本没按）都算 Miss。
+ * 计算归引擎，UI 只上报玩家按下的时刻。
+ */
+export function gradeFor(spec: ExecutionSpec, elapsedMs: number): ExecutionGrade {
+  const progress = elapsedMs / spec.windowMs;
+  if (progress >= PERFECT_BAND.start && progress < PERFECT_BAND.end) return 'perfect';
+  if (progress >= GOOD_BAND_START && progress < 1) return 'good';
+  return 'miss';
+}
+
+function scaleEffects(effects: readonly Effect[], multiplier: number): readonly Effect[] {
+  if (multiplier === 1) return effects;
+  return effects.map((effect) => {
+    switch (effect.kind) {
+      case 'gain_block':
+        return { ...effect, amount: Math.round(effect.amount * multiplier) };
+      case 'damage':
+        return { ...effect, amount: Math.round(effect.amount * multiplier) };
+    }
+  });
 }
 
 // ---------------------------------------------------------------- 只读查询
@@ -153,6 +200,7 @@ function playCard(
         player,
         phase: 'awaiting_execution',
         executionUsedThisTurn: true,
+        lastGrade: null,
         pending: {
           cardInstanceId: card.instanceId,
           spec: definition.execution,
@@ -219,16 +267,15 @@ function resumeExecution(state: RunState, atMs: number): RunState {
   const pending = encounter.pending;
   if (encounter.phase !== 'awaiting_execution' || !pending) return state;
 
-  // 输入落在窗口里的哪个位置——Execution Grade 与倍率由这个值算出来，那是 #3。
-  // 本票只保证这个值确实到得了引擎手里。
-  const elapsedMs = atMs - pending.openedAtMs;
+  const grade = gradeFor(pending.spec, atMs - pending.openedAtMs);
+  const multiplier = GRADE_MULTIPLIER[grade];
 
   const resumed: RunState = {
     ...state,
-    journal: [...state.journal, `窗口开启后 ${elapsedMs}ms 完成输入。`],
-    encounter: { ...encounter, phase: 'player_turn', pending: null },
+    journal: [...state.journal, `格挡时机：${GRADE_LABEL[grade]}（×${multiplier}）。`],
+    encounter: { ...encounter, phase: 'player_turn', pending: null, lastGrade: grade },
   };
-  return checkOutcome(applyEffects(resumed, pending.remainingEffects));
+  return checkOutcome(applyEffects(resumed, scaleEffects(pending.remainingEffects, multiplier)));
 }
 
 // ---------------------------------------------------------------- 回合推进
@@ -293,6 +340,7 @@ function endTurn(state: RunState): RunState {
       turn: encounter.turn + 1,
       player: refreshed,
       executionUsedThisTurn: false,
+      lastGrade: null,
     },
   };
 }
