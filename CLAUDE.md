@@ -1,4 +1,8 @@
-# LilRouge
+# Tower of Minds
+
+## Workflow
+
+功能开发遵循 grill → spec → tickets → implement → review 链路。完整流程见 `docs/agents/workflow.md`。
 
 ## Agent skills
 
