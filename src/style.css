@@ -270,3 +270,14 @@ button.primary:disabled {
   background: rgba(200, 67, 79, 0.18);
   color: #d2797f;
 }
+
+.foe-line {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink);
+  opacity: 0.75;
+}
+
+.foe-thinking {
+  opacity: 0.6;
+}

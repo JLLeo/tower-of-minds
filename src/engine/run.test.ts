@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyInput, canPlay, definitionOf, startRun } from './run.js';
+import { applyInput, canPlay, definitionOf, isPlayerActing, startRun } from './run.js';
 import { BUILT_IN_GENERATION, STARTING_DECK } from './content.js';
 import type { PlayerInput, RunOptions, RunState } from './types.js';
 
@@ -35,7 +35,7 @@ function scriptInputs(start: RunState, maxSteps = 500): PlayerInput[] {
       const playable = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
       input = playable
         ? { type: 'play_card', instanceId: playable.instanceId, atMs: at() }
-        : { type: 'end_turn' };
+        : { type: 'end_turn', atMs: at() };
     }
     inputs.push(input);
     state = applyInput(state, input);
@@ -105,7 +105,7 @@ describe('Card 循环', () => {
 
   it('结束回合会弃掉手牌并重新抽满', () => {
     const state = startRun(BUILT_IN_GENERATION, SEED);
-    const next = applyInput(state, { type: 'end_turn' });
+    const next = applyInput(state, { type: 'end_turn', atMs: 10_000 });
 
     expect(next.encounter.turn).toBe(2);
     expect(next.encounter.player.hand).toHaveLength(5);
@@ -116,7 +116,7 @@ describe('Card 循环', () => {
   it('抽牌堆抽空后会把弃牌堆洗回来，牌的总数不变', () => {
     let state = startRun(BUILT_IN_GENERATION, SEED);
     for (let i = 0; i < 3 && state.phase === 'in_encounter'; i++) {
-      state = applyInput(state, { type: 'end_turn' });
+      state = applyInput(state, { type: 'end_turn', atMs: 10_000 });
     }
 
     expect(state.encounter.player.hand).toHaveLength(5);
@@ -128,17 +128,130 @@ describe('Card 循环', () => {
   });
 });
 
-describe('脚本化对手', () => {
-  it('回合结束后按脚本第一项攻击玩家', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED);
-    const firstAction = state.encounter.combatants[0]?.script[0];
-    expect(firstAction?.kind).toBe('attack');
+describe('Agent 与 Intent（ADR-0001）', () => {
+  const GUARD = 'tower-guard';
 
-    const next = applyInput(state, { type: 'end_turn' });
+  function fresh(): RunState {
+    return startRun(BUILT_IN_GENERATION, SEED, { ...ALL_STRIKES, startedAtMs: 0 });
+  }
 
-    const expected = firstAction?.kind === 'attack' ? firstAction.amount : 0;
-    expect(next.encounter.player.hp).toBe(state.encounter.player.hp - expected);
-    expect(next.encounter.combatants[0]?.scriptIndex).toBe(1);
+  function answer(state: RunState, payload: unknown): RunState {
+    return applyInput(state, { type: 'intent_response', combatantId: GUARD, payload });
+  }
+
+  it('Run 一开始就挂出一个 IntentRequest', () => {
+    const state = fresh();
+
+    expect(state.encounter.intentRequest?.combatantId).toBe(GUARD);
+    expect(state.encounter.intentRequest?.requestedAtMs).toBe(0);
+    expect(state.encounter.combatants[0]?.intent).toBeNull();
+  });
+
+  it('等待模型回答不会挡住玩家', () => {
+    const state = fresh();
+    expect(state.encounter.intentRequest).not.toBeNull();
+    expect(isPlayerActing(state)).toBe(true);
+    expect(canPlay(state, state.encounter.player.hand[0]!.instanceId)).toBe(true);
+  });
+
+  it('合法响应会落成这一回合的 Intent', () => {
+    const state = answer(fresh(), { actionId: 'brace', line: '先稳住阵脚。' });
+
+    expect(state.encounter.intentRequest).toBeNull();
+    expect(state.encounter.combatants[0]?.intent).toEqual({
+      actionId: 'brace',
+      line: '先稳住阵脚。',
+      source: 'agent',
+    });
+  });
+
+  it('Agent 按自己选的 Intent 行动', () => {
+    const braced = applyInput(answer(fresh(), { actionId: 'brace', line: '' }), {
+      type: 'end_turn',
+      atMs: 1000,
+    });
+    expect(braced.encounter.combatants[0]?.block).toBe(5);
+
+    const before = fresh();
+    const crushed = applyInput(answer(before, { actionId: 'crush', line: '' }), {
+      type: 'end_turn',
+      atMs: 1000,
+    });
+    expect(crushed.encounter.player.hp).toBe(before.encounter.player.hp - 11);
+  });
+
+  it('台词会被记进 journal', () => {
+    const state = applyInput(answer(fresh(), { actionId: 'slash', line: '别再往上走了。' }), {
+      type: 'end_turn',
+      atMs: 1000,
+    });
+    expect(state.journal.some((line) => line.includes('别再往上走了。'))).toBe(true);
+  });
+
+  it('过长的台词会被截断', () => {
+    const state = answer(fresh(), { actionId: 'slash', line: '啊'.repeat(200) });
+    expect(state.encounter.combatants[0]?.intent?.line.length).toBeLessThanOrEqual(40);
+  });
+
+  describe('三条回退路径', () => {
+    it('返回不在合法动作集里的 actionId：引擎替它选，Run 继续', () => {
+      const state = answer(fresh(), { actionId: 'summon_dragon', line: '受死吧。' });
+
+      expect(state.encounter.combatants[0]?.intent?.source).toBe('fallback');
+      expect(
+        state.encounter.combatants[0]?.actions.some(
+          (a) => a.id === state.encounter.combatants[0]?.intent?.actionId,
+        ),
+      ).toBe(true);
+      expect(state.phase).toBe('in_encounter');
+    });
+
+    it('畸形响应：引擎替它选，Run 继续', () => {
+      for (const payload of [null, 'not json', 42, {}, { line: '只有台词' }, { actionId: 7 }]) {
+        const state = answer(fresh(), payload);
+        expect(state.encounter.intentRequest).toBeNull();
+        expect(state.encounter.combatants[0]?.intent?.source).toBe('fallback');
+        expect(state.phase).toBe('in_encounter');
+      }
+    });
+
+    it('超时：引擎替它选，Run 继续', () => {
+      const waiting = fresh();
+      const timeout = waiting.encounter.intentRequest!.timeoutMs;
+
+      const early = applyInput(waiting, { type: 'tick', atMs: timeout - 1 });
+      expect(early).toBe(waiting); // 没到点，原样返回
+
+      const expired = applyInput(waiting, { type: 'tick', atMs: timeout });
+      expect(expired.encounter.intentRequest).toBeNull();
+      expect(expired.encounter.combatants[0]?.intent?.source).toBe('fallback');
+      expect(expired.phase).toBe('in_encounter');
+    });
+
+    it('回退选择是确定性的：血厚时进攻，血薄时自保', () => {
+      const healthy = answer(fresh(), null);
+      const healthyAction = healthy.encounter.combatants[0]?.actions.find(
+        (a) => a.id === healthy.encounter.combatants[0]?.intent?.actionId,
+      );
+      expect(healthyAction?.kind).toBe('attack');
+    });
+  });
+
+  it('回答一个没有在等的 Combatant 不改变状态', () => {
+    const state = fresh();
+    expect(
+      applyInput(state, { type: 'intent_response', combatantId: '不存在', payload: {} }),
+    ).toBe(state);
+  });
+
+  it('行动之后会为新回合重新挂出请求', () => {
+    const state = applyInput(answer(fresh(), { actionId: 'slash', line: '' }), {
+      type: 'end_turn',
+      atMs: 4000,
+    });
+
+    expect(state.encounter.combatants[0]?.intent).toBeNull();
+    expect(state.encounter.intentRequest?.requestedAtMs).toBe(4000);
   });
 });
 
@@ -159,7 +272,7 @@ describe('完整一场', () => {
 
   it('Run 结束后再喂输入不再改变状态', () => {
     const state = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
-    expect(applyInput(state, { type: 'end_turn' })).toEqual(state);
+    expect(applyInput(state, { type: 'end_turn', atMs: 10_000 })).toEqual(state);
   });
 });
 
@@ -217,7 +330,7 @@ describe('Execution Check：挂起与恢复（ADR-0002）', () => {
 
   it('新回合重新允许一次挂起', () => {
     const resumed = applyInput(suspended(), pressAt(suspended(), 0.75));
-    const nextTurn = applyInput(resumed, { type: 'end_turn' });
+    const nextTurn = applyInput(resumed, { type: 'end_turn', atMs: 10_000 });
     expect(nextTurn.encounter.executionUsedThisTurn).toBe(false);
     expect(nextTurn.encounter.lastGrade).toBeNull();
 
@@ -308,8 +421,8 @@ describe('Execution Check：档位与倍率', () => {
     expect(ticked).toBe(suspended);
   });
 
-  it('没有挂起结算时 tick 是空操作', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED);
-    expect(applyInput(state, { type: 'tick', atMs: 9999 })).toBe(state);
+  it('既没有挂起结算、也没到 Intent 截止点时，tick 是空操作', () => {
+    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+    expect(applyInput(state, { type: 'tick', atMs: 100 })).toBe(state);
   });
 });

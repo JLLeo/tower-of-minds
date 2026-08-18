@@ -2,6 +2,7 @@ import { createRng, shuffle, type Rng } from './rng.js';
 import {
   CARD_POOL,
   HAND_SIZE,
+  INTENT_TIMEOUT_MS,
   MAX_ENERGY,
   PLAYER_MAX_HP,
   STARTING_DECK,
@@ -10,25 +11,26 @@ import {
 import type {
   CardDefinition,
   CardInstance,
+  CombatantAction,
   CombatantState,
   Effect,
   EncounterState,
   ExecutionGrade,
   ExecutionSpec,
   Generation,
+  Intent,
   PlayerInput,
   PlayerState,
   RunOptions,
   RunState,
-  ScriptedAction,
 } from './types.js';
 
 /**
  * Engine 的 Run 级公开接口，也是本仓库唯一的测试 seam。
  *
  * startRun 拿到初始状态，之后反复 applyInput 取回新状态。两者都是纯函数：
- * 同一 seed 加同一串输入必然得到同一个 Run。所有随机走 state.rng，所有时间
- * 从 input 进来——引擎自己既不掷骰也不读时钟。
+ * 同一 seed 加同一串输入必然得到同一个 Run。所有随机走 state.rng，所有时间从
+ * input 进来，模型的回答也是一种 input——引擎自己既不掷骰、不读时钟，也不联网。
  */
 export function startRun(
   generation: Generation,
@@ -36,6 +38,7 @@ export function startRun(
   options: RunOptions = {},
 ): RunState {
   const deckIds = options.startingDeck ?? STARTING_DECK;
+  const startedAtMs = options.startedAtMs ?? 0;
   const deck: readonly CardInstance[] = deckIds.map((id, index) => ({
     instanceId: `${id}#${index}`,
     definitionId: id,
@@ -60,19 +63,23 @@ export function startRun(
     player,
     combatants: floorOneCombatants(),
     pending: null,
+    intentRequest: null,
     executionUsedThisTurn: false,
     lastGrade: null,
   };
 
-  return {
-    seed,
-    rng,
-    floor: 1,
-    phase: 'in_encounter',
-    encounter,
-    outcome: null,
-    journal: [`进入${generation.title}的第 1 层。`],
-  };
+  return openIntentRequest(
+    {
+      seed,
+      rng,
+      floor: 1,
+      phase: 'in_encounter',
+      encounter,
+      outcome: null,
+      journal: [`进入${generation.title}的第 1 层。`],
+    },
+    startedAtMs,
+  );
 }
 
 export function applyInput(state: RunState, input: PlayerInput): RunState {
@@ -82,11 +89,13 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
     case 'play_card':
       return playCard(state, input.instanceId, input.atMs, input.targetId);
     case 'end_turn':
-      return endTurn(state);
+      return endTurn(state, input.atMs);
     case 'execution_input':
       return resolvePending(state, input.atMs);
+    case 'intent_response':
+      return receiveIntent(state, input.combatantId, input.payload);
     case 'tick':
-      return expireIfWindowClosed(state, input.atMs);
+      return expireIntent(expireIfWindowClosed(state, input.atMs), input.atMs);
   }
 }
 
@@ -131,6 +140,119 @@ function scaleEffects(effects: readonly Effect[], multiplier: number): readonly 
   }));
 }
 
+// ---------------------------------------------------------------- Intent
+
+/** 台词只是叙事，不能变成规则的入口，所以截断到一个安全长度。 */
+const MAX_LINE_LENGTH = 40;
+
+/**
+ * 校验模型的原样响应（ADR-0001）。凡是不在合法动作集里的东西一律拒绝——
+ * 引擎不去猜模型的意思，猜错的代价是玩家学不到规则。
+ */
+function parseIntent(payload: unknown, actions: readonly CombatantAction[]): Intent | null {
+  if (typeof payload !== 'object' || payload === null) return null;
+  const record = payload as Record<string, unknown>;
+
+  const actionId = record['actionId'];
+  if (typeof actionId !== 'string') return null;
+  if (!actions.some((action) => action.id === actionId)) return null;
+
+  const line = record['line'];
+  return {
+    actionId,
+    line: typeof line === 'string' ? line.slice(0, MAX_LINE_LENGTH) : '',
+    source: 'agent',
+  };
+}
+
+/**
+ * 模型没能按时给出合法答案时，引擎替它选。规则简单且确定：血量掉到三分之一
+ * 以下就自保，否则进攻。可玩性因此不依赖模型可用性（ADR-0001）。
+ */
+function fallbackIntent(combatant: CombatantState): Intent {
+  const wantsDefend = combatant.hp * 3 <= combatant.maxHp;
+  const preferred = combatant.actions.find(
+    (action) => action.kind === (wantsDefend ? 'defend' : 'attack'),
+  );
+  const action = preferred ?? combatant.actions[0];
+  return { actionId: action?.id ?? '', line: '', source: 'fallback' };
+}
+
+/** 若有 Agent 还没定下这一回合的行动，就挂出一个请求，等宿主去问模型。 */
+function openIntentRequest(state: RunState, atMs: number): RunState {
+  const encounter = state.encounter;
+  if (state.phase === 'ended' || encounter.intentRequest) return state;
+
+  const waiting = encounter.combatants.find((c) => c.hp > 0 && c.intent === null);
+  if (!waiting) return state;
+
+  return {
+    ...state,
+    encounter: {
+      ...encounter,
+      intentRequest: {
+        combatantId: waiting.id,
+        requestedAtMs: atMs,
+        timeoutMs: INTENT_TIMEOUT_MS,
+      },
+    },
+  };
+}
+
+function settleIntent(
+  state: RunState,
+  combatantId: string,
+  intent: Intent,
+  note: string,
+): RunState {
+  return {
+    ...state,
+    journal: [...state.journal, note],
+    encounter: {
+      ...state.encounter,
+      intentRequest: null,
+      combatants: state.encounter.combatants.map((c) =>
+        c.id === combatantId ? { ...c, intent } : c,
+      ),
+    },
+  };
+}
+
+function receiveIntent(state: RunState, combatantId: string, payload: unknown): RunState {
+  const request = state.encounter.intentRequest;
+  if (!request || request.combatantId !== combatantId) return state;
+
+  const combatant = state.encounter.combatants.find((c) => c.id === combatantId);
+  if (!combatant) return state;
+
+  const parsed = parseIntent(payload, combatant.actions);
+  if (parsed) return settleIntent(state, combatantId, parsed, `${combatant.name}打定了主意。`);
+
+  return settleIntent(
+    state,
+    combatantId,
+    fallbackIntent(combatant),
+    `${combatant.name}没有给出合法的选择，凭本能行动。`,
+  );
+}
+
+/** 请求超时：引擎替它选，Run 继续。没到点就原样返回同一个对象。 */
+function expireIntent(state: RunState, atMs: number): RunState {
+  const request = state.encounter.intentRequest;
+  if (!request) return state;
+  if (atMs - request.requestedAtMs < request.timeoutMs) return state;
+
+  const combatant = state.encounter.combatants.find((c) => c.id === request.combatantId);
+  if (!combatant) return state;
+
+  return settleIntent(
+    state,
+    request.combatantId,
+    fallbackIntent(combatant),
+    `${combatant.name}等不及了，凭本能行动。`,
+  );
+}
+
 // ---------------------------------------------------------------- 只读查询
 // 渲染层通过这些函数读状态，自己不重新推导任何规则。
 
@@ -143,12 +265,11 @@ export function definitionOf(state: RunState, instanceId: string): CardDefinitio
   return CARD_POOL.find((d) => d.id === card.definitionId);
 }
 
-/** 现在是否轮到玩家出牌。 */
+/** 现在是否轮到玩家出牌。等 Intent 不会挡住玩家——Run 永远不因模型停下。 */
 export function isPlayerActing(state: RunState): boolean {
   return state.phase === 'in_encounter' && state.encounter.phase === 'player_turn';
 }
 
-/** 这张手牌现在打不打得出去——能量、时机、牌是否还在手上，全部在这里判。 */
 export function canPlay(state: RunState, instanceId: string): boolean {
   if (!isPlayerActing(state)) return false;
   if (!state.encounter.player.hand.some((c) => c.instanceId === instanceId)) return false;
@@ -160,14 +281,16 @@ export function livingCombatants(state: RunState): readonly CombatantState[] {
   return state.encounter.combatants.filter((c) => c.hp > 0);
 }
 
+/** 某个 Agent 这一回合打算做的事，供界面显示。还没定下来时返回 undefined。 */
+export function intendedAction(combatant: CombatantState): CombatantAction | undefined {
+  const intent = combatant.intent;
+  if (!intent) return undefined;
+  return combatant.actions.find((action) => action.id === intent.actionId);
+}
+
 // ---------------------------------------------------------------- 打牌
 
-function playCard(
-  state: RunState,
-  instanceId: string,
-  atMs: number,
-  targetId?: string,
-): RunState {
+function playCard(state: RunState, instanceId: string, atMs: number, targetId?: string): RunState {
   if (!canPlay(state, instanceId)) return state;
 
   const encounter = state.encounter;
@@ -187,7 +310,7 @@ function playCard(
   const journal = [...state.journal, `你打出「${definition.name}」。`];
 
   // ADR-0002：需要实时输入的 Card 在这里把结算挂起，剩下的效果等输入回来再执行。
-  // 每回合只挂起一次——同回合的后续 Card 直接结算，不再要求玩家做判定。
+  // 每回合只挂起一次——同回合的后续 Card 直接结算。
   if (definition.execution && !encounter.executionUsedThisTurn) {
     return {
       ...state,
@@ -288,7 +411,7 @@ function expireIfWindowClosed(state: RunState, atMs: number): RunState {
 
 // ---------------------------------------------------------------- 回合推进
 
-function endTurn(state: RunState): RunState {
+function endTurn(state: RunState, atMs: number): RunState {
   const encounter = state.encounter;
   if (encounter.phase !== 'player_turn') return state;
 
@@ -304,57 +427,56 @@ function endTurn(state: RunState): RunState {
     const combatant = combatants[i];
     if (!combatant || combatant.hp <= 0) continue;
 
-    const action = nextActionOf(combatant);
-    // 上一轮攒下的 block 在它再次行动时清空。
-    const advanced: CombatantState = {
-      ...combatant,
-      block: 0,
-      scriptIndex: combatant.scriptIndex + 1,
-    };
+    // 还没等到模型回答就轮到它行动：引擎替它选，Run 不停。
+    const intent = combatant.intent ?? fallbackIntent(combatant);
+    const action = combatant.actions.find((a) => a.id === intent.actionId);
+
+    // 上一轮攒下的 block 在它再次行动时清空，行动完 intent 也随之作废。
+    const acted: CombatantState = { ...combatant, block: 0, intent: null };
+    if (intent.line) journal.push(`${combatant.name}：「${intent.line}」`);
 
     if (!action) {
-      combatants[i] = advanced;
+      combatants[i] = acted;
       continue;
     }
     if (action.kind === 'attack') {
       const { block, dealt } = absorb(player.block, action.amount);
       player = { ...player, block, hp: Math.max(0, player.hp - dealt) };
-      combatants[i] = advanced;
-      journal.push(`${combatant.name}攻击，造成 ${dealt} 点伤害。`);
+      combatants[i] = acted;
+      journal.push(`${combatant.name}${action.description}，造成 ${dealt} 点伤害。`);
     } else {
-      combatants[i] = { ...advanced, block: action.amount };
-      journal.push(`${combatant.name}架起 ${action.amount} 点格挡。`);
+      combatants[i] = { ...acted, block: action.amount };
+      journal.push(`${combatant.name}${action.description}。`);
     }
   }
 
-  const afterFoes = checkOutcome({
+  const afterCombatants = checkOutcome({
     ...state,
     journal,
-    encounter: { ...encounter, player, combatants },
+    encounter: { ...encounter, player, combatants, intentRequest: null },
   });
-  if (afterFoes.phase === 'ended') return afterFoes;
+  if (afterCombatants.phase === 'ended') return afterCombatants;
 
   const [rng, refreshed] = draw(
-    afterFoes.rng,
+    afterCombatants.rng,
     { ...player, block: 0, energy: player.maxEnergy },
     HAND_SIZE,
   );
 
-  return {
-    ...afterFoes,
-    rng,
-    encounter: {
-      ...afterFoes.encounter,
-      turn: encounter.turn + 1,
-      player: refreshed,
-      executionUsedThisTurn: false,
-      lastGrade: null,
+  return openIntentRequest(
+    {
+      ...afterCombatants,
+      rng,
+      encounter: {
+        ...afterCombatants.encounter,
+        turn: encounter.turn + 1,
+        player: refreshed,
+        executionUsedThisTurn: false,
+        lastGrade: null,
+      },
     },
-  };
-}
-
-function nextActionOf(combatant: CombatantState): ScriptedAction | undefined {
-  return combatant.script[combatant.scriptIndex % combatant.script.length];
+    atMs,
+  );
 }
 
 // ---------------------------------------------------------------- 抽牌
@@ -391,7 +513,7 @@ function checkOutcome(state: RunState): RunState {
       ...state,
       phase: 'ended',
       outcome: 'defeat',
-      encounter: { ...encounter, phase: 'ended', pending: null },
+      encounter: { ...encounter, phase: 'ended', pending: null, intentRequest: null },
       journal: [...state.journal, '你倒在了塔里。'],
     };
   }
@@ -401,7 +523,7 @@ function checkOutcome(state: RunState): RunState {
       ...state,
       phase: 'ended',
       outcome: 'victory',
-      encounter: { ...encounter, phase: 'ended', pending: null },
+      encounter: { ...encounter, phase: 'ended', pending: null, intentRequest: null },
       journal: [...state.journal, '这一层清空了。'],
     };
   }

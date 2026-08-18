@@ -29,26 +29,29 @@ export const MAX_ENERGY = 3;
 export const HAND_SIZE = 5;
 
 /**
- * 第 1 层的对手。它按固定脚本行动，因此是 Combatant 而不是 Agent
- * ——把 script 换成 LLM 选出的 Intent 是 #4。
+ * 第 1 层的对手。它的下一步由 LLM 从 actions 里挑，因此它是 Agent。
  */
 export function floorOneCombatants(): readonly CombatantState[] {
   return [
     {
       id: 'tower-guard',
       name: '塔卫',
+      goal: '把外来者挡在第二层之下，但不想为此送命。',
       hp: 45,
       maxHp: 45,
       block: 0,
-      script: [
-        { kind: 'attack', amount: 7 },
-        { kind: 'attack', amount: 7 },
-        { kind: 'defend', amount: 5 },
+      actions: [
+        { id: 'slash', kind: 'attack', amount: 7, description: '挥刀劈砍，造成 7 点伤害' },
+        { id: 'crush', kind: 'attack', amount: 11, description: '沉重的下劈，造成 11 点伤害' },
+        { id: 'brace', kind: 'defend', amount: 5, description: '举盾自守，获得 5 点格挡' },
       ],
-      scriptIndex: 0,
+      intent: null,
     },
   ];
 }
+
+/** 一次 IntentRequest 允许等待多久。实测中位延迟约 360ms，这里留足余量。 */
+export const INTENT_TIMEOUT_MS = 2500;
 
 /** Generation 失败时的内置局势，也是本票唯一的局势（#10 起才真正生成）。 */
 export const BUILT_IN_GENERATION: Generation = {

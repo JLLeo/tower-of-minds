@@ -35,22 +35,49 @@ export interface CardInstance {
 
 // ---------------------------------------------------------------- Combatants
 
-export type ScriptedAction =
-  | { readonly kind: 'attack'; readonly amount: number }
-  | { readonly kind: 'defend'; readonly amount: number };
+/** Combatant 的动作库中的一项。合法动作集就是从这里来的。 */
+export interface CombatantAction {
+  readonly id: string;
+  readonly kind: 'attack' | 'defend';
+  readonly amount: number;
+  /** 给 LLM 看的说明。引擎只认 kind 和 amount。 */
+  readonly description: string;
+}
 
 /**
- * Encounter 中的一个战斗单位。本票里它按固定脚本行动，所以它不是 Agent
- * ——把 script 换成 LLM 选出的 Intent 是 #4。
+ * Agent 为下一回合选定的行动。它永远是引擎给出的合法动作集里的一个——
+ * source 记下它究竟是模型选的，还是模型没能按时给出合法答案时引擎替它选的。
+ */
+export interface Intent {
+  readonly actionId: string;
+  readonly line: string;
+  readonly source: 'agent' | 'fallback';
+}
+
+/**
+ * Encounter 中的一个战斗单位。它的下一步由 LLM 决定，因此它是 Agent。
  */
 export interface CombatantState {
   readonly id: string;
   readonly name: string;
+  /** 喂给模型的动机。引擎不解释它，只负责传递。 */
+  readonly goal: string;
   readonly hp: number;
   readonly maxHp: number;
   readonly block: number;
-  readonly script: readonly ScriptedAction[];
-  readonly scriptIndex: number;
+  readonly actions: readonly CombatantAction[];
+  readonly intent: Intent | null;
+}
+
+/**
+ * 引擎正在等待某个 Agent 的 Intent。宿主看到它就去调 provider，把原样的响应
+ * 通过 intent_response 交回来；超时由引擎按 tick 判断。
+ * 本票一场只有一个 Agent，所以一次只有一个请求；#6 的多方混战会让它变成一组。
+ */
+export interface IntentRequest {
+  readonly combatantId: string;
+  readonly requestedAtMs: number;
+  readonly timeoutMs: number;
 }
 
 /**
@@ -99,6 +126,7 @@ export interface EncounterState {
   readonly player: PlayerState;
   readonly combatants: readonly CombatantState[];
   readonly pending: PendingExecution | null;
+  readonly intentRequest: IntentRequest | null;
   /** ADR-0002：每回合最多触发一次 Execution Check。 */
   readonly executionUsedThisTurn: boolean;
   /** 本回合最近一次判定的结果，供界面当场反馈。新回合清空。 */
@@ -131,7 +159,12 @@ export type PlayerInput =
       readonly atMs: number;
       readonly targetId?: string;
     }
-  | { readonly type: 'end_turn' }
+  | { readonly type: 'end_turn'; readonly atMs: number }
+  /**
+   * 模型对一次 IntentRequest 的原样响应。payload 是 unknown：解析与合法性校验
+   * 都归引擎（ADR-0001），宿主只负责把网络上拿到的东西原封不动送进来。
+   */
+  | { readonly type: 'intent_response'; readonly combatantId: string; readonly payload: unknown }
   | { readonly type: 'execution_input'; readonly atMs: number }
   /**
    * 时间的流逝。UI 每帧上报当前时刻，引擎据此判断判定窗口是否已经耗尽——
@@ -156,4 +189,6 @@ export interface Generation {
  */
 export interface RunOptions {
   readonly startingDeck?: readonly string[];
+  /** Run 开始的时刻，用于第一次 IntentRequest 的超时计算。 */
+  readonly startedAtMs?: number;
 }

@@ -4,6 +4,7 @@ import {
   PERFECT_BAND,
   canPlay,
   definitionOf,
+  intendedAction,
   isPlayerActing,
 } from '../engine/run.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
@@ -76,13 +77,28 @@ function meter(label: string, value: number, max: number, className: string): HT
 
 function combatantsView(state: RunState): HTMLElement {
   const section = el('section', 'foes');
+  const waitingFor = state.encounter.intentRequest?.combatantId;
+
   for (const combatant of state.encounter.combatants) {
     const down = combatant.hp <= 0;
     const card = el('div', down ? 'foe foe-down' : 'foe');
     card.appendChild(el('h2', undefined, combatant.name));
     card.appendChild(meter('HP', combatant.hp, combatant.maxHp, 'fill-hp'));
     if (combatant.block > 0) card.appendChild(el('div', 'block-badge', `格挡 ${combatant.block}`));
-    if (down) card.appendChild(el('div', 'foe-next', '已倒下'));
+
+    if (down) {
+      card.appendChild(el('div', 'foe-next', '已倒下'));
+    } else {
+      // Intent：它下一回合打算做什么。动作由引擎从合法集里确认过，台词只是叙事。
+      const action = intendedAction(combatant);
+      if (action) {
+        card.appendChild(el('div', 'foe-next', `意图：${action.description}`));
+        const line = combatant.intent?.line;
+        if (line) card.appendChild(el('div', 'foe-line', `「${line}」`));
+      } else if (waitingFor === combatant.id) {
+        card.appendChild(el('div', 'foe-next foe-thinking', '正在盘算…'));
+      }
+    }
     section.appendChild(card);
   }
   return section;
@@ -222,7 +238,9 @@ function controls(state: RunState, dispatch: Dispatch): HTMLElement {
   endTurn.className = 'primary';
   endTurn.textContent = '结束回合';
   endTurn.disabled = !isPlayerActing(state);
-  endTurn.addEventListener('click', () => dispatch({ type: 'end_turn' }));
+  endTurn.addEventListener('click', () =>
+    dispatch({ type: 'end_turn', atMs: performance.now() }),
+  );
   section.appendChild(endTurn);
   return section;
 }
