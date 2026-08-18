@@ -15,8 +15,12 @@ Tower 的一层，也是 Run 的推进单位。越往上，卷入派系争斗越
 **Faction**:
 Agent 的归属。Faction 之间存在天然的利益冲突——不是所有 Agent 都只想杀玩家。名册在 Run 开始时由 Generation 一次定死，贯穿整座 Tower：每个 Floor 的 Agent 都从同一份名册里来。
 
+**Combatant**:
+Encounter 中的一个战斗单位。Agent 是由 LLM 决定下一步的 Combatant；按固定脚本行动的对手同样是 Combatant，但不是 Agent。
+_Avoid_: 敌人, foe, 怪物, 单位
+
 **Agent**:
-Tower 中由 LLM 驱动、拥有自身目标与记忆的存在。区别于按固定脚本行动的东西——如果它的下一步不需要 LLM 决定，它就不是 Agent。
+Tower 中由 LLM 驱动、拥有自身目标与记忆的 Combatant。区别于按固定脚本行动的东西——如果它的下一步不需要 LLM 决定，它就不是 Agent。
 _Avoid_: NPC, bot, AI, 怪物, 敌人
 
 **Player**:

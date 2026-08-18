@@ -1,10 +1,12 @@
+import { canPlay, definitionOf, isPlayerActing } from '../engine/run.js';
 import type { CardDefinition, PlayerInput, RunState } from '../engine/types.js';
 
 export type Dispatch = (input: PlayerInput) => void;
 
 /**
- * 把 RunState 画出来。渲染层不持有任何游戏状态，也不做任何规则判断——
- * 它只读状态、发输入。所有规则都在 engine 里（这也是单一测试 seam 成立的原因）。
+ * 把 RunState 画出来。渲染层不持有游戏状态，也不推导规则——需要判断的地方
+ * 一律问 engine 导出的查询函数（canPlay / isPlayerActing / definitionOf）。
+ * 这是单一测试 seam 能覆盖全部行为的前提：UI 里没有未被测试的规则。
  */
 export function render(
   root: HTMLElement,
@@ -14,11 +16,11 @@ export function render(
 ): void {
   root.replaceChildren(
     header(state),
-    foesView(state),
+    combatantsView(state),
     playerView(state),
     handView(state, dispatch),
     controls(state, dispatch),
-    logView(state),
+    journalView(state),
     ...(state.phase === 'ended' ? [outcomeView(state, restart)] : []),
   );
 }
@@ -31,7 +33,11 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 }
 
 function header(state: RunState): HTMLElement {
-  return el('header', 'header', `Tower of Minds — 第 ${state.floor} 层 · 回合 ${state.encounter.turn}`);
+  return el(
+    'header',
+    'header',
+    `Tower of Minds — 第 ${state.floor} 层 · 回合 ${state.encounter.turn}`,
+  );
 }
 
 function meter(label: string, value: number, max: number, className: string): HTMLElement {
@@ -45,28 +51,15 @@ function meter(label: string, value: number, max: number, className: string): HT
   return wrap;
 }
 
-function foesView(state: RunState): HTMLElement {
+function combatantsView(state: RunState): HTMLElement {
   const section = el('section', 'foes');
-  for (const foe of state.encounter.foes) {
-    const card = el('div', foe.hp > 0 ? 'foe' : 'foe foe-down');
-    card.appendChild(el('h2', undefined, foe.name));
-    card.appendChild(meter('HP', foe.hp, foe.maxHp, 'fill-hp'));
-    if (foe.block > 0) card.appendChild(el('div', 'block-badge', `格挡 ${foe.block}`));
-
-    if (foe.hp > 0) {
-      // 脚本化对手：这里显示的是它写死的下一步，不是 Intent。
-      // Intent 是由 LLM 选出来的东西（见 CONTEXT.md），要等 #4。
-      const nextAction = foe.script[foe.scriptIndex % foe.script.length];
-      if (nextAction) {
-        const text =
-          nextAction.kind === 'attack'
-            ? `下一步：攻击 ${nextAction.amount}`
-            : `下一步：格挡 ${nextAction.amount}`;
-        card.appendChild(el('div', 'foe-next', text));
-      }
-    } else {
-      card.appendChild(el('div', 'foe-next', '已倒下'));
-    }
+  for (const combatant of state.encounter.combatants) {
+    const down = combatant.hp <= 0;
+    const card = el('div', down ? 'foe foe-down' : 'foe');
+    card.appendChild(el('h2', undefined, combatant.name));
+    card.appendChild(meter('HP', combatant.hp, combatant.maxHp, 'fill-hp'));
+    if (combatant.block > 0) card.appendChild(el('div', 'block-badge', `格挡 ${combatant.block}`));
+    if (down) card.appendChild(el('div', 'foe-next', '已倒下'));
     section.appendChild(card);
   }
   return section;
@@ -80,11 +73,7 @@ function playerView(state: RunState): HTMLElement {
     el('div', 'stats', `能量 ${player.energy}/${player.maxEnergy} · 格挡 ${player.block}`),
   );
   section.appendChild(
-    el(
-      'div',
-      'piles',
-      `抽牌堆 ${player.drawPile.length} · 弃牌堆 ${player.discardPile.length}`,
-    ),
+    el('div', 'piles', `抽牌堆 ${player.drawPile.length} · 弃牌堆 ${player.discardPile.length}`),
   );
   return section;
 }
@@ -98,22 +87,19 @@ function describe(definition: CardDefinition): string {
 
 function handView(state: RunState, dispatch: Dispatch): HTMLElement {
   const section = el('section', 'hand');
-  const player = state.encounter.player;
-  const interactive = state.phase === 'in_encounter' && state.encounter.phase === 'player_turn';
 
-  for (const card of player.hand) {
-    const definition = state.cards.find((d) => d.id === card.definitionId);
+  for (const card of state.encounter.player.hand) {
+    const definition = definitionOf(state, card.instanceId);
     if (!definition) continue;
 
-    const affordable = definition.cost <= player.energy;
     const button = document.createElement('button');
     button.className = `card card-${definition.type}`;
-    button.disabled = !interactive || !affordable;
+    button.disabled = !canPlay(state, card.instanceId);
     button.appendChild(el('span', 'card-cost', String(definition.cost)));
     button.appendChild(el('span', 'card-name', definition.name));
     button.appendChild(el('span', 'card-text', describe(definition)));
     button.addEventListener('click', () =>
-      dispatch({ type: 'play_card', instanceId: card.instanceId }),
+      dispatch({ type: 'play_card', instanceId: card.instanceId, atMs: performance.now() }),
     );
     section.appendChild(button);
   }
@@ -124,7 +110,7 @@ function controls(state: RunState, dispatch: Dispatch): HTMLElement {
   const section = el('section', 'controls');
 
   if (state.encounter.phase === 'awaiting_execution') {
-    // #3 会在这里放格挡时机条。骨架阶段只给一个能把结算推下去的按钮。
+    // #3 会在这里放格挡时机条。骨架阶段只给一个把输入时刻交给引擎的按钮。
     const resume = document.createElement('button');
     resume.className = 'primary';
     resume.textContent = '继续结算';
@@ -138,15 +124,15 @@ function controls(state: RunState, dispatch: Dispatch): HTMLElement {
   const endTurn = document.createElement('button');
   endTurn.className = 'primary';
   endTurn.textContent = '结束回合';
-  endTurn.disabled = state.phase !== 'in_encounter' || state.encounter.phase !== 'player_turn';
+  endTurn.disabled = !isPlayerActing(state);
   endTurn.addEventListener('click', () => dispatch({ type: 'end_turn' }));
   section.appendChild(endTurn);
   return section;
 }
 
-function logView(state: RunState): HTMLElement {
+function journalView(state: RunState): HTMLElement {
   const section = el('section', 'log');
-  for (const line of state.log.slice(-8)) section.appendChild(el('p', undefined, line));
+  for (const line of state.journal.slice(-8)) section.appendChild(el('p', undefined, line));
   return section;
 }
 

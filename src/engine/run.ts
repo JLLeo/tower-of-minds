@@ -5,26 +5,28 @@ import {
   MAX_ENERGY,
   PLAYER_MAX_HP,
   STARTING_DECK,
-  floorOneFoes,
+  floorOneCombatants,
 } from './content.js';
 import type {
   CardDefinition,
   CardInstance,
+  CombatantState,
   Effect,
   EncounterState,
-  FoeState,
   Generation,
   PlayerInput,
   PlayerState,
   RunOptions,
   RunState,
+  ScriptedAction,
 } from './types.js';
 
 /**
  * Engine 的 Run 级公开接口，也是本仓库唯一的测试 seam。
  *
- * 用法是 startRun 拿到初始状态，之后反复 applyInput 取回新状态。两者都是纯函数：
- * 同一 seed 加同一串输入必然得到同一个 Run。所有随机都走 state.rng。
+ * startRun 拿到初始状态，之后反复 applyInput 取回新状态。两者都是纯函数：
+ * 同一 seed 加同一串输入必然得到同一个 Run。所有随机走 state.rng，所有时间
+ * 从 input 进来——引擎自己既不掷骰也不读时钟。
  */
 export function startRun(
   generation: Generation,
@@ -39,7 +41,7 @@ export function startRun(
   }));
 
   const [rngAfterShuffle, drawPile] = shuffle(createRng(seed), deck);
-  const empty: PlayerState = {
+  const fresh: PlayerState = {
     hp: PLAYER_MAX_HP,
     maxHp: PLAYER_MAX_HP,
     block: 0,
@@ -49,14 +51,15 @@ export function startRun(
     drawPile,
     discardPile: [],
   };
-  const [rng, player] = draw(rngAfterShuffle, empty, HAND_SIZE);
+  const [rng, player] = draw(rngAfterShuffle, fresh, HAND_SIZE);
 
   const encounter: EncounterState = {
     turn: 1,
     phase: 'player_turn',
     player,
-    foes: floorOneFoes(),
+    combatants: floorOneCombatants(),
     pending: null,
+    executionUsedThisTurn: false,
   };
 
   return {
@@ -67,7 +70,7 @@ export function startRun(
     phase: 'in_encounter',
     encounter,
     outcome: null,
-    log: [`进入${generation.title}的第 1 层。`],
+    journal: [`进入${generation.title}的第 1 层。`],
   };
 }
 
@@ -76,26 +79,57 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
 
   switch (input.type) {
     case 'play_card':
-      return playCard(state, input.instanceId, input.targetId);
+      return playCard(state, input.instanceId, input.atMs, input.targetId);
     case 'end_turn':
       return endTurn(state);
     case 'execution_input':
-      return resumeExecution(state);
+      return resumeExecution(state, input.atMs);
   }
+}
+
+// ---------------------------------------------------------------- 只读查询
+// 渲染层通过这些函数读状态，自己不重新推导任何规则。
+
+export function definitionOf(state: RunState, instanceId: string): CardDefinition | undefined {
+  const card =
+    state.encounter.player.hand.find((c) => c.instanceId === instanceId) ??
+    state.encounter.player.drawPile.find((c) => c.instanceId === instanceId) ??
+    state.encounter.player.discardPile.find((c) => c.instanceId === instanceId);
+  if (!card) return undefined;
+  return state.cards.find((d) => d.id === card.definitionId);
+}
+
+/** 现在是否轮到玩家出牌。 */
+export function isPlayerActing(state: RunState): boolean {
+  return state.phase === 'in_encounter' && state.encounter.phase === 'player_turn';
+}
+
+/** 这张手牌现在打不打得出去——能量、时机、牌是否还在手上，全部在这里判。 */
+export function canPlay(state: RunState, instanceId: string): boolean {
+  if (!isPlayerActing(state)) return false;
+  if (!state.encounter.player.hand.some((c) => c.instanceId === instanceId)) return false;
+  const definition = definitionOf(state, instanceId);
+  return definition !== undefined && definition.cost <= state.encounter.player.energy;
+}
+
+export function livingCombatants(state: RunState): readonly CombatantState[] {
+  return state.encounter.combatants.filter((c) => c.hp > 0);
 }
 
 // ---------------------------------------------------------------- 打牌
 
-function playCard(state: RunState, instanceId: string, targetId?: string): RunState {
+function playCard(
+  state: RunState,
+  instanceId: string,
+  atMs: number,
+  targetId?: string,
+): RunState {
+  if (!canPlay(state, instanceId)) return state;
+
   const encounter = state.encounter;
-  if (encounter.phase !== 'player_turn') return state;
-
   const card = encounter.player.hand.find((c) => c.instanceId === instanceId);
-  if (!card) return state;
-
-  const definition = state.cards.find((d) => d.id === card.definitionId);
-  if (!definition) return state;
-  if (definition.cost > encounter.player.energy) return state;
+  const definition = definitionOf(state, instanceId);
+  if (!card || !definition) return state;
 
   const player: PlayerState = {
     ...encounter.player,
@@ -104,29 +138,34 @@ function playCard(state: RunState, instanceId: string, targetId?: string): RunSt
     discardPile: [...encounter.player.discardPile, card],
   };
 
-  const target = targetId ?? encounter.foes.find((f) => f.hp > 0)?.id;
+  const target = targetId ?? livingCombatants(state)[0]?.id;
   const effects = effectsOf(definition, target);
-  const log = [...state.log, `你打出「${definition.name}」。`];
+  const journal = [...state.journal, `你打出「${definition.name}」。`];
 
   // ADR-0002：需要实时输入的 Card 在这里把结算挂起，剩下的效果等输入回来再执行。
-  if (definition.execution) {
+  // 每回合只挂起一次——同回合的后续 Card 直接结算，不再要求玩家做判定。
+  if (definition.execution && !encounter.executionUsedThisTurn) {
     return {
       ...state,
-      log,
+      journal,
       encounter: {
         ...encounter,
         player,
         phase: 'awaiting_execution',
+        executionUsedThisTurn: true,
         pending: {
           cardInstanceId: card.instanceId,
           spec: definition.execution,
+          openedAtMs: atMs,
           remainingEffects: effects,
         },
       },
     };
   }
 
-  return settle(applyEffects({ ...state, log, encounter: { ...encounter, player } }, effects));
+  return checkOutcome(
+    applyEffects({ ...state, journal, encounter: { ...encounter, player } }, effects),
+  );
 }
 
 function effectsOf(definition: CardDefinition, targetId: string | undefined): readonly Effect[] {
@@ -153,8 +192,8 @@ function applyEffects(state: RunState, effects: readonly Effect[]): RunState {
     }
     encounter = {
       ...encounter,
-      foes: encounter.foes.map((foe) =>
-        foe.id === effect.targetId ? damageFoe(foe, effect.amount) : foe,
+      combatants: encounter.combatants.map((combatant) =>
+        combatant.id === effect.targetId ? takeHit(combatant, effect.amount) : combatant,
       ),
     };
   }
@@ -162,28 +201,34 @@ function applyEffects(state: RunState, effects: readonly Effect[]): RunState {
   return { ...state, encounter };
 }
 
-function damageFoe(foe: FoeState, amount: number): FoeState {
-  const absorbed = Math.min(foe.block, amount);
-  return {
-    ...foe,
-    block: foe.block - absorbed,
-    hp: Math.max(0, foe.hp - (amount - absorbed)),
-  };
+/** 格挡先吃伤害，剩下的进 HP。玩家和 Combatant 用的是同一套算法。 */
+function absorb(block: number, amount: number): { block: number; dealt: number } {
+  const absorbed = Math.min(block, amount);
+  return { block: block - absorbed, dealt: amount - absorbed };
+}
+
+function takeHit(combatant: CombatantState, amount: number): CombatantState {
+  const { block, dealt } = absorb(combatant.block, amount);
+  return { ...combatant, block, hp: Math.max(0, combatant.hp - dealt) };
 }
 
 // ---------------------------------------------------------------- 结算挂起的恢复
 
-function resumeExecution(state: RunState): RunState {
+function resumeExecution(state: RunState, atMs: number): RunState {
   const encounter = state.encounter;
   const pending = encounter.pending;
   if (encounter.phase !== 'awaiting_execution' || !pending) return state;
 
-  // Execution Grade 与倍率在 #3 落地；这里先按原值结算，只验证挂起与恢复的通路。
+  // 输入落在窗口里的哪个位置——Execution Grade 与倍率由这个值算出来，那是 #3。
+  // 本票只保证这个值确实到得了引擎手里。
+  const elapsedMs = atMs - pending.openedAtMs;
+
   const resumed: RunState = {
     ...state,
+    journal: [...state.journal, `窗口开启后 ${elapsedMs}ms 完成输入。`],
     encounter: { ...encounter, phase: 'player_turn', pending: null },
   };
-  return settle(applyEffects(resumed, pending.remainingEffects));
+  return checkOutcome(applyEffects(resumed, pending.remainingEffects));
 }
 
 // ---------------------------------------------------------------- 回合推进
@@ -197,34 +242,41 @@ function endTurn(state: RunState): RunState {
     hand: [],
     discardPile: [...encounter.player.discardPile, ...encounter.player.hand],
   };
-  const foes = [...encounter.foes];
-  const log = [...state.log];
+  const combatants = [...encounter.combatants];
+  const journal = [...state.journal];
 
-  for (let i = 0; i < foes.length; i++) {
-    const foe = foes[i];
-    if (!foe || foe.hp <= 0) continue;
+  for (let i = 0; i < combatants.length; i++) {
+    const combatant = combatants[i];
+    if (!combatant || combatant.hp <= 0) continue;
 
-    const action = foe.script[foe.scriptIndex % foe.script.length];
+    const action = nextActionOf(combatant);
     // 上一轮攒下的 block 在它再次行动时清空。
-    const advanced: FoeState = { ...foe, block: 0, scriptIndex: foe.scriptIndex + 1 };
+    const advanced: CombatantState = {
+      ...combatant,
+      block: 0,
+      scriptIndex: combatant.scriptIndex + 1,
+    };
 
     if (!action) {
-      foes[i] = advanced;
+      combatants[i] = advanced;
       continue;
     }
     if (action.kind === 'attack') {
-      const absorbed = Math.min(player.block, action.amount);
-      const dealt = action.amount - absorbed;
-      player = { ...player, block: player.block - absorbed, hp: Math.max(0, player.hp - dealt) };
-      foes[i] = advanced;
-      log.push(`${foe.name}攻击，造成 ${dealt} 点伤害。`);
+      const { block, dealt } = absorb(player.block, action.amount);
+      player = { ...player, block, hp: Math.max(0, player.hp - dealt) };
+      combatants[i] = advanced;
+      journal.push(`${combatant.name}攻击，造成 ${dealt} 点伤害。`);
     } else {
-      foes[i] = { ...advanced, block: action.amount };
-      log.push(`${foe.name}架起 ${action.amount} 点格挡。`);
+      combatants[i] = { ...advanced, block: action.amount };
+      journal.push(`${combatant.name}架起 ${action.amount} 点格挡。`);
     }
   }
 
-  const afterFoes = settle({ ...state, log, encounter: { ...encounter, player, foes } });
+  const afterFoes = checkOutcome({
+    ...state,
+    journal,
+    encounter: { ...encounter, player, combatants },
+  });
   if (afterFoes.phase === 'ended') return afterFoes;
 
   const [rng, refreshed] = draw(
@@ -236,8 +288,17 @@ function endTurn(state: RunState): RunState {
   return {
     ...afterFoes,
     rng,
-    encounter: { ...afterFoes.encounter, turn: encounter.turn + 1, player: refreshed },
+    encounter: {
+      ...afterFoes.encounter,
+      turn: encounter.turn + 1,
+      player: refreshed,
+      executionUsedThisTurn: false,
+    },
   };
+}
+
+function nextActionOf(combatant: CombatantState): ScriptedAction | undefined {
+  return combatant.script[combatant.scriptIndex % combatant.script.length];
 }
 
 // ---------------------------------------------------------------- 抽牌
@@ -265,7 +326,7 @@ function draw(rng: Rng, player: PlayerState, count: number): readonly [Rng, Play
 
 // ---------------------------------------------------------------- 胜负
 
-function settle(state: RunState): RunState {
+function checkOutcome(state: RunState): RunState {
   const encounter = state.encounter;
   if (encounter.phase === 'ended') return state;
 
@@ -275,17 +336,17 @@ function settle(state: RunState): RunState {
       phase: 'ended',
       outcome: 'defeat',
       encounter: { ...encounter, phase: 'ended', pending: null },
-      log: [...state.log, '你倒在了塔里。'],
+      journal: [...state.journal, '你倒在了塔里。'],
     };
   }
 
-  if (encounter.foes.every((foe) => foe.hp <= 0)) {
+  if (encounter.combatants.every((combatant) => combatant.hp <= 0)) {
     return {
       ...state,
       phase: 'ended',
       outcome: 'victory',
       encounter: { ...encounter, phase: 'ended', pending: null },
-      log: [...state.log, '这一层清空了。'],
+      journal: [...state.journal, '这一层清空了。'],
     };
   }
 

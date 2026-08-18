@@ -1,4 +1,4 @@
-import type { CardDefinition, FoeState, Generation } from './types.js';
+import type { CardDefinition, CombatantState, Generation } from './types.js';
 
 /**
  * 固定卡池。Generation 永远不产出 Card（ADR-0005），所以这里是静态资产。
@@ -22,9 +22,10 @@ export const MAX_ENERGY = 3;
 export const HAND_SIZE = 5;
 
 /**
- * 第 1 层的对手。它按固定脚本行动，因此不是 Agent——把它换成 Agent 是 #4。
+ * 第 1 层的对手。它按固定脚本行动，因此是 Combatant 而不是 Agent
+ * ——把 script 换成 LLM 选出的 Intent 是 #4。
  */
-export function floorOneFoes(): readonly FoeState[] {
+export function floorOneCombatants(): readonly CombatantState[] {
   return [
     {
       id: 'tower-guard',
@@ -45,5 +46,4 @@ export function floorOneFoes(): readonly FoeState[] {
 /** Generation 失败时的内置局势，也是本票唯一的局势（#10 起才真正生成）。 */
 export const BUILT_IN_GENERATION: Generation = {
   title: '围城中的塔',
-  factions: [],
 };
