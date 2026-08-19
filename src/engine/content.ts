@@ -1,6 +1,7 @@
 import { cardTypeOf, costOf } from './atoms.js';
 import {
   NO_STATUSES,
+  type AgentState,
   type CardDefinition,
   type CardType,
   type CombatantState,
@@ -84,14 +85,35 @@ export const MAX_ENERGY = 3;
 export const HAND_SIZE = 5;
 
 /**
- * 第 1 层的对手。它的下一步由 LLM 从 actions 里挑，因此它是 Agent。
+ * 本局的 Agent，一个 Faction 一个（ADR-0010）。#10 会让 Generation 生成它们的
+ * 结仇原因与诉求；在那之前这是内置的一套。
+ */
+export function builtInAgents(): readonly AgentState[] {
+  return [
+    {
+      factionId: 'red-ring',
+      name: '赤环',
+      persona: '守序而好战，认死理，看不起摇摆的人。',
+      goal: '把外来者挡在塔的下层，但不想为此赔上自己人。',
+    },
+    {
+      factionId: 'green-vine',
+      name: '青蔓',
+      persona: '谨慎，记仇，擅长等别人先出手。',
+      goal: '保住塔里的补给线，谁挡路就记谁一笔。',
+    },
+  ];
+}
+
+/**
+ * 第 1 层的对手。它的下一步由所属 Faction 的 Agent 决定。
  */
 export function floorOneCombatants(): readonly CombatantState[] {
   return [
     {
       id: 'tower-guard',
       name: '塔卫',
-      goal: '把外来者挡在第二层之下，但不想为此送命。',
+      factionId: 'red-ring',
       hp: 45,
       maxHp: 45,
       block: 0,

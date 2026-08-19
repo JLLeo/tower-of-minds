@@ -14,7 +14,7 @@
 import { applyInput, startRun } from '../src/engine/run.js';
 import { BUILT_IN_GENERATION } from '../src/engine/content.js';
 import { createDeepSeekProvider } from '../src/llm/deepseek.js';
-import { contextFor } from '../src/llm/provider.js';
+import { taskFor } from '../src/llm/provider.js';
 
 try {
   process.loadEnvFile('.env');
@@ -42,28 +42,23 @@ let rejected = 0;
 
 for (let i = 1; i <= rounds; i++) {
   const state = startRun(BUILT_IN_GENERATION, i, { startedAtMs: 0 });
-  const request = state.encounter.intentRequest;
-  const combatant = state.encounter.combatants.find((c) => c.id === request?.combatantId);
+  const request = state.agentRequests[0];
+  const task = request ? taskFor(state, request) : undefined;
 
-  if (!request || !combatant) {
-    console.log(`#${i}  引擎没有挂出 IntentRequest，跳过`);
+  if (!request || !task) {
+    console.log(`#${i}  引擎没有挂出提问，跳过`);
     continue;
   }
 
   const startedAt = performance.now();
   try {
-    const payload = await provider.requestIntent(contextFor(state, combatant), new AbortController().signal);
+    const payload = await provider.ask(task, new AbortController().signal);
     const elapsedMs = performance.now() - startedAt;
     timings.push(elapsedMs);
 
     // 合法性由引擎判，不在这里另写一份规则。
-    const next = applyInput(state, {
-      type: 'intent_response',
-      combatantId: combatant.id,
-      requestedAtMs: request.requestedAtMs,
-      payload,
-    });
-    const intent = next.encounter.combatants.find((c) => c.id === combatant.id)?.intent;
+    const next = applyInput(state, { type: 'agent_response', requestId: request.id, payload });
+    const intent = next.encounter.combatants.find((c) => c.id === request.combatantId)?.intent;
     const accepted = intent?.source === 'agent';
     if (!accepted) rejected++;
 

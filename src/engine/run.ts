@@ -1,12 +1,19 @@
 import { createRng, nextInt, shuffle, type Rng } from './rng.js';
 import { effectsOf } from './atoms.js';
 import {
+  dropRequests,
+  expireRequests,
+  fallbackIntent,
+  openIntentRequests,
+  receiveResponse,
+} from './agents.js';
+import {
   CARD_POOL,
   HAND_SIZE,
-  INTENT_TIMEOUT_MS,
   MAX_ENERGY,
   PLAYER_MAX_HP,
   STARTING_DECK,
+  builtInAgents,
   floorOneCombatants,
 } from './content.js';
 import { NO_STATUSES } from './types.js';
@@ -21,7 +28,6 @@ import type {
   ExecutionGrade,
   ExecutionSpec,
   Generation,
-  Intent,
   PlayerInput,
   PlayerState,
   RunOptions,
@@ -67,15 +73,16 @@ export function startRun(
     player,
     combatants: floorOneCombatants(),
     pending: null,
-    intentRequest: null,
     executionUsedThisTurn: false,
     lastGrade: null,
   };
 
-  return openIntentRequest(
+  return openIntentRequests(
     {
       seed,
       rng,
+      agents: builtInAgents(),
+      agentRequests: [],
       floor: 1,
       phase: 'in_encounter',
       encounter,
@@ -96,10 +103,10 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
       return endTurn(state, input.atMs);
     case 'execution_input':
       return resolvePending(state, input.atMs);
-    case 'intent_response':
-      return receiveIntent(state, input.combatantId, input.requestedAtMs, input.payload);
+    case 'agent_response':
+      return receiveResponse(state, input.requestId, input.payload);
     case 'tick':
-      return expireIntent(expireIfWindowClosed(state, input.atMs), input.atMs);
+      return expireRequests(expireIfWindowClosed(state, input.atMs), input.atMs);
   }
 }
 
@@ -150,126 +157,6 @@ function scaleEffects(effects: readonly Effect[], multiplier: number): readonly 
     SCALABLE.has(effect.kind)
       ? { ...effect, amount: Math.max(1, Math.round(effect.amount * multiplier)) }
       : effect,
-  );
-}
-
-// ---------------------------------------------------------------- Intent
-
-/** 台词只是叙事，不能变成规则的入口，所以截断到一个安全长度。 */
-const MAX_LINE_LENGTH = 40;
-
-/**
- * 校验模型的原样响应（ADR-0001）。凡是不在合法动作集里的东西一律拒绝——
- * 引擎不去猜模型的意思，猜错的代价是玩家学不到规则。
- */
-function parseIntent(payload: unknown, actions: readonly CombatantAction[]): Intent | null {
-  if (typeof payload !== 'object' || payload === null) return null;
-  const record = payload as Record<string, unknown>;
-
-  const actionId = record['actionId'];
-  if (typeof actionId !== 'string') return null;
-  if (!actions.some((action) => action.id === actionId)) return null;
-
-  const line = record['line'];
-  return {
-    actionId,
-    line: typeof line === 'string' ? line.slice(0, MAX_LINE_LENGTH) : '',
-    source: 'agent',
-  };
-}
-
-/**
- * 模型没能按时给出合法答案时，引擎替它选。规则简单且确定：血量掉到三分之一
- * 以下就自保，否则进攻。可玩性因此不依赖模型可用性（ADR-0001）。
- */
-function fallbackIntent(combatant: CombatantState): Intent {
-  const wantsDefend = combatant.hp * 3 <= combatant.maxHp;
-  const preferred = combatant.actions.find(
-    (action) => action.kind === (wantsDefend ? 'defend' : 'attack'),
-  );
-  const action = preferred ?? combatant.actions[0];
-  return { actionId: action?.id ?? '', line: '', source: 'fallback' };
-}
-
-/** 若有 Agent 还没定下这一回合的行动，就挂出一个请求，等宿主去问模型。 */
-function openIntentRequest(state: RunState, atMs: number): RunState {
-  const encounter = state.encounter;
-  if (state.phase === 'ended' || encounter.intentRequest) return state;
-
-  const waiting = encounter.combatants.find((c) => c.hp > 0 && c.intent === null);
-  if (!waiting) return state;
-
-  return {
-    ...state,
-    encounter: {
-      ...encounter,
-      intentRequest: {
-        combatantId: waiting.id,
-        requestedAtMs: atMs,
-        timeoutMs: INTENT_TIMEOUT_MS,
-      },
-    },
-  };
-}
-
-function settleIntent(
-  state: RunState,
-  combatantId: string,
-  intent: Intent,
-  note: string,
-): RunState {
-  return {
-    ...state,
-    journal: [...state.journal, note],
-    encounter: {
-      ...state.encounter,
-      intentRequest: null,
-      combatants: state.encounter.combatants.map((c) =>
-        c.id === combatantId ? { ...c, intent } : c,
-      ),
-    },
-  };
-}
-
-function receiveIntent(
-  state: RunState,
-  combatantId: string,
-  requestedAtMs: number,
-  payload: unknown,
-): RunState {
-  const request = state.encounter.intentRequest;
-  if (!request || request.combatantId !== combatantId) return state;
-  // 迟到的响应：它回答的是已经被超时顶掉的那次提问，战况早已不同，丢掉。
-  if (request.requestedAtMs !== requestedAtMs) return state;
-
-  const combatant = state.encounter.combatants.find((c) => c.id === combatantId);
-  if (!combatant) return state;
-
-  const parsed = parseIntent(payload, combatant.actions);
-  if (parsed) return settleIntent(state, combatantId, parsed, `${combatant.name}打定了主意。`);
-
-  return settleIntent(
-    state,
-    combatantId,
-    fallbackIntent(combatant),
-    `${combatant.name}没有给出合法的选择，凭本能行动。`,
-  );
-}
-
-/** 请求超时：引擎替它选，Run 继续。没到点就原样返回同一个对象。 */
-function expireIntent(state: RunState, atMs: number): RunState {
-  const request = state.encounter.intentRequest;
-  if (!request) return state;
-  if (atMs - request.requestedAtMs < request.timeoutMs) return state;
-
-  const combatant = state.encounter.combatants.find((c) => c.id === request.combatantId);
-  if (!combatant) return state;
-
-  return settleIntent(
-    state,
-    request.combatantId,
-    fallbackIntent(combatant),
-    `${combatant.name}等不及了，凭本能行动。`,
   );
 }
 
@@ -597,11 +484,9 @@ function endTurn(state: RunState, atMs: number): RunState {
     journal.push(`${combatant.name}被灼烧，受到 ${burn} 点伤害。`);
   }
 
-  const afterCombatants = checkOutcome({
-    ...state,
-    journal,
-    encounter: { ...encounter, player, combatants, intentRequest: null },
-  });
+  const afterCombatants = checkOutcome(
+    dropRequests({ ...state, journal, encounter: { ...encounter, player, combatants } }),
+  );
   if (afterCombatants.phase === 'ended') return afterCombatants;
 
   const [rng, refreshed] = draw(
@@ -616,7 +501,7 @@ function endTurn(state: RunState, atMs: number): RunState {
     HAND_SIZE,
   );
 
-  return openIntentRequest(
+  return openIntentRequests(
     {
       ...afterCombatants,
       rng,
@@ -666,7 +551,8 @@ function checkOutcome(state: RunState): RunState {
       ...state,
       phase: 'ended',
       outcome: 'defeat',
-      encounter: { ...encounter, phase: 'ended', pending: null, intentRequest: null },
+      agentRequests: [],
+      encounter: { ...encounter, phase: 'ended', pending: null },
       journal: [...state.journal, '你倒在了塔里。'],
     };
   }
@@ -676,7 +562,8 @@ function checkOutcome(state: RunState): RunState {
       ...state,
       phase: 'ended',
       outcome: 'victory',
-      encounter: { ...encounter, phase: 'ended', pending: null, intentRequest: null },
+      agentRequests: [],
+      encounter: { ...encounter, phase: 'ended', pending: null },
       journal: [...state.journal, '这一层清空了。'],
     };
   }

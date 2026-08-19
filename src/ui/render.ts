@@ -7,6 +7,7 @@ import {
   intendedAction,
   isPlayerActing,
 } from '../engine/run.js';
+import { pendingRequestFor } from '../engine/agents.js';
 import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
@@ -78,7 +79,6 @@ function meter(label: string, value: number, max: number, className: string): HT
 
 function combatantsView(state: RunState): HTMLElement {
   const section = el('section', 'combatants');
-  const waitingFor = state.encounter.intentRequest?.combatantId;
 
   for (const combatant of state.encounter.combatants) {
     const down = combatant.hp <= 0;
@@ -96,7 +96,10 @@ function combatantsView(state: RunState): HTMLElement {
         card.appendChild(el('div', 'combatant-next', `意图：${action.description}`));
         const line = combatant.intent?.line;
         if (line) card.appendChild(el('div', 'combatant-line', `「${line}」`));
-      } else if (waitingFor === combatant.id && state.encounter.phase !== 'awaiting_execution') {
+      } else if (
+        pendingRequestFor(state, 'intent', combatant.factionId) !== undefined &&
+        state.encounter.phase !== 'awaiting_execution'
+      ) {
         // 玩家正在做 Execution Check 时不显示这行：等待要被玩法盖住，不是摆在脸上。
         card.appendChild(el('div', 'combatant-next combatant-thinking', '正在盘算…'));
       }

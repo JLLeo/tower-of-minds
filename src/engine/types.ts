@@ -65,8 +65,8 @@ export interface Intent {
 export interface CombatantState {
   readonly id: string;
   readonly name: string;
-  /** 喂给模型的动机。引擎不解释它，只负责传递。 */
-  readonly goal: string;
+  /** 它属于哪个 Faction——它的心智就是那个 Faction 的 Agent。 */
+  readonly factionId: string;
   readonly hp: number;
   readonly maxHp: number;
   readonly block: number;
@@ -76,19 +76,44 @@ export interface CombatantState {
 }
 
 /**
- * 引擎正在等待某个 Agent 的 Intent。宿主看到它就去调 provider，把原样的响应
- * 通过 intent_response 交回来；超时由引擎按 tick 判断。
- * 本票一场只有一个 Agent，所以一次只有一个请求；#6 的多方混战会让它变成一组。
+ * 一个 Faction 的持久心智（ADR-0010）。它在战斗中选 Intent、在 Fusion 时决定取舍、
+ * 在层间为自己构筑——这些出自同一个 Agent，共享同一份性格与目标。
+ * Memory 挂在这里，在 #8 落地。
  */
-export interface IntentRequest {
-  readonly combatantId: string;
+export interface AgentState {
+  readonly factionId: string;
+  readonly name: string;
+  readonly persona: string;
+  readonly goal: string;
+}
+
+/**
+ * 引擎正在等待某个 Agent 的回答。
+ *
+ * kind 决定问的是什么、怎么校验、以及答不上来时怎么回退。目前只有 intent，
+ * Fusion（#13）与层间构筑（#14）各自加一个 kind——suspend / validate / fallback
+ * 这条路只写一份（ADR-0010）。
+ */
+export type AgentRequestKind = 'intent';
+
+export interface AgentRequestBase {
+  /** 唯一标识这一次提问。响应靠它认领，迟到的响应因此认得出来。 */
+  readonly id: string;
+  readonly factionId: string;
   readonly requestedAtMs: number;
   readonly timeoutMs: number;
 }
 
+export interface IntentRequest extends AgentRequestBase {
+  readonly kind: 'intent';
+  readonly combatantId: string;
+}
+
+export type AgentRequest = IntentRequest;
+
 /**
  * Player 目前单独建模，因为只有他持有 Deck。#6 的多方混战会让 Player 也变成
- * 战场上的一个 Combatant——那次改动是有意留给 #6 的，不在本票范围内。
+ * 战场上的一个 Combatant——那次改动是有意留给 #6 的。
  */
 export interface PlayerState {
   readonly hp: number;
@@ -180,7 +205,6 @@ export interface EncounterState {
   readonly player: PlayerState;
   readonly combatants: readonly CombatantState[];
   readonly pending: PendingExecution | null;
-  readonly intentRequest: IntentRequest | null;
   /** ADR-0002：每回合最多触发一次 Execution Check。 */
   readonly executionUsedThisTurn: boolean;
   /** 本回合最近一次判定的结果，供界面当场反馈。新回合清空。 */
@@ -193,6 +217,13 @@ export type RunOutcome = 'victory' | 'defeat';
 export interface RunState {
   readonly seed: number;
   readonly rng: Rng;
+  /** 本局的 Agent，一个 Faction 一个，贯穿整座 Tower。 */
+  readonly agents: readonly AgentState[];
+  /**
+   * 引擎正在等待回答的提问。放在 Run 级而不是 Encounter 级，因为 Fusion 的提问
+   * 发生在层间——那时并没有 Encounter 在进行。
+   */
+  readonly agentRequests: readonly AgentRequest[];
   readonly floor: number;
   readonly phase: RunPhase;
   readonly encounter: EncounterState;
@@ -215,18 +246,13 @@ export type PlayerInput =
     }
   | { readonly type: 'end_turn'; readonly atMs: number }
   /**
-   * 模型对一次 IntentRequest 的原样响应。payload 是 unknown：解析与合法性校验
-   * 都归引擎（ADR-0001），宿主只负责把网络上拿到的东西原封不动送进来。
+   * 模型对一次 AgentRequest 的原样响应。payload 是 unknown：解析与合法性校验都归
+   * 引擎（ADR-0001），宿主只负责把网络上拿到的东西原封不动送进来。
    *
-   * requestedAtMs 用来指认这是在回答哪一次请求。超时回退之后迟到的响应带着
-   * 过期的时刻，会被引擎丢掉——否则它会顶掉下一回合的 Intent，而那是它没看过的战况。
+   * requestId 指认这是在回答哪一次提问。超时回退之后迟到的响应带着已经作废的 id，
+   * 会被引擎丢掉——否则它会顶掉一次它没看过的局面下的决定。
    */
-  | {
-      readonly type: 'intent_response';
-      readonly combatantId: string;
-      readonly requestedAtMs: number;
-      readonly payload: unknown;
-    }
+  | { readonly type: 'agent_response'; readonly requestId: string; readonly payload: unknown }
   | { readonly type: 'execution_input'; readonly atMs: number }
   /**
    * 时间的流逝。UI 每帧上报当前时刻，引擎据此判断判定窗口是否已经耗尽——

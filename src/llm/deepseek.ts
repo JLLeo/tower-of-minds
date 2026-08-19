@@ -1,6 +1,6 @@
 import { describeAtoms } from '../engine/atoms.js';
 import { CARD_POOL } from '../engine/content.js';
-import type { IntentContext, IntentProvider } from './provider.js';
+import type { AgentProvider, AgentTask } from './provider.js';
 
 const CARD_POOL_LINES = CARD_POOL.map(
   (card) => `- ${card.name}（${card.cost} 费）：${describeAtoms(card.atoms)}`,
@@ -20,18 +20,31 @@ const SYSTEM_PROMPT = `你在一款卡牌 roguelike 里扮演塔中的一个角�
 对手用的牌来自这个固定卡池：
 ${CARD_POOL_LINES}`;
 
-function userPrompt(context: IntentContext): string {
-  const { combatant } = context;
-  const actions = combatant.actions
-    .map((action) => `- ${action.id}：${action.description}`)
-    .join('\n');
+/**
+ * 用户段分两块：Agent 段（性格 + 目标，本局内不变）在前，任务段在后。
+ * 全局规则与卡池留在 system 里，对所有 Agent、所有 kind 完全一致，用于命中缓存。
+ */
+function userPrompt(task: AgentTask): string {
+  const persona = `你是${task.agent.name}。你的性格：${task.agent.persona}
+你的目标：${task.agent.goal}`;
 
-  return `你是${combatant.name}。你的目标：${combatant.goal}
-第 ${context.turn} 回合。你 HP ${combatant.hp}/${combatant.maxHp}，格挡 ${combatant.block}。
-对手 HP ${context.playerHp}/${context.playerMaxHp}，格挡 ${context.playerBlock}，手里还有 ${context.handSize} 张牌。
+  switch (task.kind) {
+    case 'intent': {
+      const { combatant } = task;
+      const actions = combatant.actions
+        .map((action) => `- ${action.id}：${action.description}`)
+        .join('\n');
+
+      return `${persona}
+
+现在由你决定${combatant.name}这一回合做什么。
+第 ${task.turn} 回合。它 HP ${combatant.hp}/${combatant.maxHp}，格挡 ${combatant.block}。
+对手 HP ${task.playerHp}/${task.playerMaxHp}，格挡 ${task.playerBlock}，手里还有 ${task.handSize} 张牌。
 
 合法动作：
 ${actions}`;
+    }
+  }
 }
 
 export interface DeepSeekOptions {
@@ -42,9 +55,9 @@ export interface DeepSeekOptions {
   readonly apiKey?: string;
 }
 
-export function createDeepSeekProvider(options: DeepSeekOptions): IntentProvider {
+export function createDeepSeekProvider(options: DeepSeekOptions): AgentProvider {
   return {
-    async requestIntent(context: IntentContext, signal: AbortSignal): Promise<unknown> {
+    async ask(task: AgentTask, signal: AbortSignal): Promise<unknown> {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (options.apiKey) headers['Authorization'] = `Bearer ${options.apiKey}`;
 
@@ -56,7 +69,7 @@ export function createDeepSeekProvider(options: DeepSeekOptions): IntentProvider
           model: options.model,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userPrompt(context) },
+            { role: 'user', content: userPrompt(task) },
           ],
           // 这个模型默认开着 thinking，reasoning token 会吃掉 max_tokens 并推高延迟。
           // 实测只有 { type: 'disabled' } 真的关得掉。

@@ -156,11 +156,9 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   }
 
   function answer(state: RunState, payload: unknown): RunState {
-    const request = state.encounter.intentRequest;
     return applyInput(state, {
-      type: 'intent_response',
-      combatantId: GUARD,
-      requestedAtMs: request?.requestedAtMs ?? 0,
+      type: 'agent_response',
+      requestId: state.agentRequests[0]?.id ?? 'none',
       payload,
     });
   }
@@ -168,14 +166,14 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   it('Run 一开始就挂出一个 IntentRequest', () => {
     const state = fresh();
 
-    expect(state.encounter.intentRequest?.combatantId).toBe(GUARD);
-    expect(state.encounter.intentRequest?.requestedAtMs).toBe(0);
+    expect(state.agentRequests[0]?.combatantId).toBe(GUARD);
+    expect(state.agentRequests[0]?.requestedAtMs).toBe(0);
     expect(state.encounter.combatants[0]?.intent).toBeNull();
   });
 
   it('等待模型回答不会挡住玩家', () => {
     const state = fresh();
-    expect(state.encounter.intentRequest).not.toBeNull();
+    expect(state.agentRequests).toHaveLength(1);
     expect(isPlayerActing(state)).toBe(true);
     expect(canPlay(state, state.encounter.player.hand[0]!.instanceId)).toBe(true);
   });
@@ -183,7 +181,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   it('合法响应会落成这一回合的 Intent', () => {
     const state = answer(fresh(), { actionId: 'brace', line: '先稳住阵脚。' });
 
-    expect(state.encounter.intentRequest).toBeNull();
+    expect(state.agentRequests).toHaveLength(0);
     expect(state.encounter.combatants[0]?.intent).toEqual({
       actionId: 'brace',
       line: '先稳住阵脚。',
@@ -235,7 +233,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
     it('畸形响应：引擎替它选，Run 继续', () => {
       for (const payload of [null, 'not json', 42, {}, { line: '只有台词' }, { actionId: 7 }]) {
         const state = answer(fresh(), payload);
-        expect(state.encounter.intentRequest).toBeNull();
+        expect(state.agentRequests).toHaveLength(0);
         expect(state.encounter.combatants[0]?.intent?.source).toBe('fallback');
         expect(state.phase).toBe('in_encounter');
       }
@@ -243,13 +241,13 @@ describe('Agent 与 Intent（ADR-0001）', () => {
 
     it('超时：引擎替它选，Run 继续', () => {
       const waiting = fresh();
-      const timeout = waiting.encounter.intentRequest!.timeoutMs;
+      const timeout = waiting.agentRequests[0]!.timeoutMs;
 
       const early = applyInput(waiting, { type: 'tick', atMs: timeout - 1 });
       expect(early).toBe(waiting); // 没到点，原样返回
 
       const expired = applyInput(waiting, { type: 'tick', atMs: timeout });
-      expect(expired.encounter.intentRequest).toBeNull();
+      expect(expired.agentRequests).toHaveLength(0);
       expect(expired.encounter.combatants[0]?.intent?.source).toBe('fallback');
       expect(expired.phase).toBe('in_encounter');
     });
@@ -263,21 +261,16 @@ describe('Agent 与 Intent（ADR-0001）', () => {
     });
   });
 
-  it('回答一个没有在等的 Combatant 不改变状态', () => {
+  it('回答一个不存在的提问不改变状态', () => {
     const state = fresh();
     expect(
-      applyInput(state, {
-        type: 'intent_response',
-        combatantId: '不存在',
-        requestedAtMs: 0,
-        payload: {},
-      }),
+      applyInput(state, { type: 'agent_response', requestId: '不存在', payload: {} }),
     ).toBe(state);
   });
 
   it('超时回退之后迟到的响应会被丢掉，不会顶掉下一回合的 Intent', () => {
     const waiting = fresh();
-    const stale = waiting.encounter.intentRequest!;
+    const stale = waiting.agentRequests[0]!;
 
     // 先超时，引擎替它选
     const expired = applyInput(waiting, { type: 'tick', atMs: stale.timeoutMs });
@@ -285,19 +278,18 @@ describe('Agent 与 Intent（ADR-0001）', () => {
 
     // 打完这一回合，新回合挂出一次新的请求
     const nextTurn = applyInput(expired, { type: 'end_turn', atMs: 9000 });
-    const currentRequest = nextTurn.encounter.intentRequest;
+    const currentRequest = nextTurn.agentRequests[0];
     expect(currentRequest?.requestedAtMs).toBe(9000);
 
     // 那次早已超时的提问现在才回来：它看的是上一回合的战况，必须被丢掉
     const late = applyInput(nextTurn, {
-      type: 'intent_response',
-      combatantId: GUARD,
-      requestedAtMs: stale.requestedAtMs,
+      type: 'agent_response',
+      requestId: stale.id,
       payload: { actionId: 'crush', line: '迟到的杀意。' },
     });
 
     expect(late).toBe(nextTurn);
-    expect(late.encounter.intentRequest).toEqual(currentRequest);
+    expect(late.agentRequests[0]).toEqual(currentRequest);
     expect(late.encounter.combatants[0]?.intent).toBeNull();
   });
 
@@ -308,7 +300,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
     });
 
     expect(state.encounter.combatants[0]?.intent).toBeNull();
-    expect(state.encounter.intentRequest?.requestedAtMs).toBe(4000);
+    expect(state.agentRequests[0]?.requestedAtMs).toBe(4000);
   });
 });
 
@@ -544,9 +536,8 @@ describe('Atom 效果', () => {
 
   function answerWith(state: RunState, actionId: string): RunState {
     return applyInput(state, {
-      type: 'intent_response',
-      combatantId: 'tower-guard',
-      requestedAtMs: state.encounter.intentRequest!.requestedAtMs,
+      type: 'agent_response',
+      requestId: state.agentRequests[0]!.id,
       payload: { actionId, line: '' },
     });
   }
@@ -684,5 +675,50 @@ describe('Atom 效果', () => {
     glean = playCardById(glean, 'glean');
     expect(glean.encounter.player.discardPile.length).toBe(0);
     expect(glean.encounter.player.hand.length).toBe(5);
+  });
+});
+
+describe('AgentRequest 管道（ADR-0010）', () => {
+  it('Agent 是 Faction 级的，一个 Faction 一个', () => {
+    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+
+    expect(state.agents.length).toBeGreaterThan(1);
+    const factions = new Set(state.agents.map((a) => a.factionId));
+    expect(factions.size).toBe(state.agents.length);
+
+    // 场上的 Combatant 都归属于某个已知 Faction
+    for (const combatant of state.encounter.combatants) {
+      expect(factions.has(combatant.factionId)).toBe(true);
+    }
+  });
+
+  it('每个提问都带 kind 与唯一 id，并指向发问对象所属的 Faction', () => {
+    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+    const request = state.agentRequests[0];
+
+    expect(request?.kind).toBe('intent');
+    expect(request?.id).toBeTruthy();
+    const combatant = state.encounter.combatants.find((c) => c.id === request?.combatantId);
+    expect(request?.factionId).toBe(combatant?.factionId);
+  });
+
+  it('提问不会跨回合堆积：没回答的问题在回合推进时作废', () => {
+    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+    expect(state.agentRequests).toHaveLength(1);
+    const first = state.agentRequests[0]!;
+
+    // 一直不回答，直接结束回合
+    const next = applyInput(state, { type: 'end_turn', atMs: 5000 });
+
+    expect(next.agentRequests).toHaveLength(1);
+    expect(next.agentRequests[0]!.id).not.toBe(first.id);
+    // 上一回合的对手仍然行动了——引擎替它选（ADR-0001）
+    expect(next.encounter.player.hp).toBeLessThan(state.encounter.player.hp);
+  });
+
+  it('Run 结束时不留下任何待回答的提问', () => {
+    const ended = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
+    expect(ended.phase).toBe('ended');
+    expect(ended.agentRequests).toHaveLength(0);
   });
 });
