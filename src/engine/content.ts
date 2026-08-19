@@ -1,4 +1,4 @@
-import { cardTypeOf, costOf } from './atoms.js';
+import { MAX_ATOMS_PER_CARD, cardTypeOf, costOf } from './atoms.js';
 import {
   NO_STATUSES,
   type AgentState,
@@ -27,6 +27,9 @@ function defineCard(
   faction: string,
   atoms: readonly string[],
 ): CardDefinition {
+  if (atoms.length === 0 || atoms.length > MAX_ATOMS_PER_CARD) {
+    throw new Error(`${id} 的 Atom 数量必须在 1 到 ${MAX_ATOMS_PER_CARD} 之间`);
+  }
   const type = cardTypeOf(atoms);
   const execution = EXECUTION_BY_TYPE[type];
   return {

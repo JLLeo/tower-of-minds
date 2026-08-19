@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyInput, canPlay, definitionOf, isPlayerActing, startRun } from './run.js';
-import { ATOMS, MAX_ATOMS_PER_CARD } from './atoms.js';
+import { ATOMS, MAX_ATOMS_PER_CARD, effectsOf } from './atoms.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
@@ -477,22 +477,35 @@ describe('Execution Check：档位与倍率', () => {
 });
 
 describe('Atom 系统', () => {
-  it('费用由 Atom 权重推出，不是手写的', () => {
-    const byId = new Map(CARD_POOL.map((card) => [card.id, card]));
+  it('费用由 Atom 权重推出：打出后扣掉的能量就是算出来的那个数', () => {
+    const one = startRun(BUILT_IN_GENERATION, SEED, deckOf('strike'));
+    expect(one.encounter.player.energy - playCardById(one, 'strike').encounter.player.energy).toBe(
+      1,
+    ); // strike(3) -> ceil(3/3)
 
-    expect(byId.get('strike')?.cost).toBe(1); // strike(3) -> ceil(3/3)
-    expect(byId.get('heavy')?.cost).toBe(2); // strike(3)+pierce(3) -> ceil(6/3)
-    expect(byId.get('bulwark')?.cost).toBe(2); // guard(3)+endure(2) -> ceil(5/3)
-    expect(byId.get('flurry')?.cost).toBe(1); // multi(2) -> ceil(2/3)
+    const two = startRun(BUILT_IN_GENERATION, SEED, deckOf('heavy'));
+    expect(two.encounter.player.energy - playCardById(two, 'heavy').encounter.player.energy).toBe(
+      2,
+    ); // strike(3)+pierce(3) -> ceil(6/3)
   });
 
-  it('Card Type 由主导 Atom 推出', () => {
-    const byId = new Map(CARD_POOL.map((card) => [card.id, card]));
+  it('Card Type 由主导 Atom 推出：防御为主的牌才会触发格挡判定', () => {
+    // 铁壁 = guard + endure，防御轴占多数 -> shield -> 挂起判定
+    const shield = startRun(BUILT_IN_GENERATION, SEED, deckOf('bulwark'));
+    expect(playCardById(shield, 'bulwark').encounter.phase).toBe('awaiting_execution');
 
-    expect(byId.get('strike')?.type).toBe('attack');
-    expect(byId.get('guard')?.type).toBe('shield');
-    expect(byId.get('siphon')?.type).toBe('spell');
-    expect(byId.get('bulwark')?.type).toBe('shield');
+    // 汲取 = draw，只有资源轴 -> spell -> 本票还没有它的判定原型
+    const spell = startRun(BUILT_IN_GENERATION, SEED, deckOf('siphon'));
+    expect(playCardById(spell, 'siphon').encounter.phase).toBe('player_turn');
+  });
+
+  it('每个已落地的 Atom 都真的产生效果——不会只收费不干活', () => {
+    // 这条不在 seam 上：它守的是 Atom 表本身的完整性，而不是某个行为。
+    // 没有它，新加的 Atom 会静默地只参与费用计算却什么都不做。
+    for (const atom of ATOMS) {
+      if (atom.pendingTicket) continue;
+      expect(effectsOf([atom.id], 'tower-guard').length).toBeGreaterThan(0);
+    }
   });
 
   it('每个 Faction 各有 10 张 Base Card', () => {
@@ -635,6 +648,23 @@ describe('Atom 效果', () => {
     expect(foeOf(state).statuses.weakened).toBe(false);
   });
 
+  it('反伤不会消耗掉目标身上的易伤——那个加成留给玩家自己的下一击', () => {
+    const deck = {
+      startingDeck: ['bramble', 'crack', 'strike', 'bramble', 'crack', 'strike', 'strike', 'strike', 'strike', 'strike'],
+      startedAtMs: 0,
+    };
+    let state = startRun(BUILT_IN_GENERATION, SEED, deck);
+    state = answerWith(state, 'slash');
+
+    state = playAndResolve(state, 'bramble');
+    state = playCardById(state, 'crack');
+    expect(foeOf(state).statuses.exposed).toBe(true);
+
+    // 对手攻击 -> 触发反伤。易伤不该在这里被花掉。
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+    expect(foeOf(state).statuses.exposed).toBe(true);
+  });
+
   it('thorns 在对手攻击时反弹', () => {
     let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('bramble'));
     state = answerWith(state, 'slash');
@@ -660,21 +690,42 @@ describe('Atom 效果', () => {
     expect(state.encounter.player.statuses.endure).toBe(0);
   });
 
-  it('draw 抽牌、surge 给能量、recall 从弃牌堆取回', () => {
+  it('draw 抽牌、surge 给能量', () => {
     let siphon = startRun(BUILT_IN_GENERATION, SEED, deckOf('siphon'));
     const handBefore = siphon.encounter.player.hand.length;
     siphon = playCardById(siphon, 'siphon');
-    expect(siphon.encounter.player.hand.length).toBe(handBefore);
+    expect(siphon.encounter.player.hand.length).toBe(handBefore); // 打掉一张、抽回一张
 
     let surged = startRun(BUILT_IN_GENERATION, SEED, deckOf('surge'));
     const energyBefore = surged.encounter.player.energy;
     surged = playCardById(surged, 'surge');
-    expect(surged.encounter.player.energy).toBe(energyBefore);
+    expect(surged.encounter.player.energy).toBe(energyBefore); // -1 费 +1 能量
+  });
 
-    let glean = startRun(BUILT_IN_GENERATION, SEED, deckOf('glean'));
-    glean = playCardById(glean, 'glean');
-    expect(glean.encounter.player.discardPile.length).toBe(0);
-    expect(glean.encounter.player.hand.length).toBe(5);
+  it('recall 从弃牌堆取回，但取不回正在结算的这张牌自己', () => {
+    const deck = {
+      startingDeck: ['strike', 'glean', 'strike', 'glean', 'strike', 'strike', 'glean', 'strike', 'strike', 'strike'],
+      startedAtMs: 0,
+    };
+
+    // 弃牌堆空着的时候打出回收：它不该把自己捡回来
+    const empty = startRun(BUILT_IN_GENERATION, SEED, deck);
+    const alone = playCardById(empty, 'glean');
+    expect(alone.encounter.player.discardPile).toHaveLength(1);
+    expect(alone.encounter.player.discardPile[0]?.instanceId).toContain('glean');
+    expect(alone.encounter.player.hand).toHaveLength(4);
+
+    // 弃牌堆里有东西时，取回的是那张
+    const played = playCardById(empty, 'strike');
+    expect(played.encounter.player.discardPile).toHaveLength(1);
+    const recalled = playCardById(played, 'glean');
+    expect(recalled.encounter.player.discardPile).toHaveLength(1);
+    expect(recalled.encounter.player.discardPile[0]?.instanceId).toContain('glean');
+    expect(
+      recalled.encounter.player.hand.filter((c) => c.instanceId.startsWith('strike#')).length,
+    ).toBeGreaterThan(
+      played.encounter.player.hand.filter((c) => c.instanceId.startsWith('strike#')).length,
+    );
   });
 });
 

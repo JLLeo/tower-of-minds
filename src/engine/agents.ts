@@ -9,10 +9,10 @@ import type {
 } from './types.js';
 
 /**
- * 所有 AI 决策共用的一条管道（ADR-0010）。
+ * 所有 Agent 决策共用的一条管道（ADR-0010）。
  *
  * 引擎挂出带 kind 的提问，宿主去问模型，把响应原样交回来；引擎按 kind 校验，
- * 非法即按 kind 回退到确定性选择。增加一个 AI 角色 = 增加一个 kind、一个校验器、
+ * 非法即按 kind 回退到确定性选择。增加一个 Agent 角色 = 增加一个 kind、一个校验器、
  * 一个回退策略，suspend / validate / fallback 这条路不用再写一遍。
  *
  * ADR-0001 的边界对每一种 kind 都成立：模型永远只在引擎给出的合法集里选。
@@ -24,22 +24,26 @@ const MAX_LINE_LENGTH = 40;
 // ---------------------------------------------------------------- 挂出提问
 
 /**
- * 为所有还没定下这一回合行动的 Agent 挂出 intent 提问。
- * 一个 Faction 一次只问一个 Combatant——同派的单位共享一个心智，不该自己跟自己抢。
+ * 为每个还没定下这一回合行动的 Combatant 挂出一个 intent 提问。
+ *
+ * 每个 Combatant 一个提问，即使同属一个 Faction——它们共享心智与记忆，但各自站在
+ * 场上的不同位置，行动要分别决定。合并成一次调用是 ADR-0004 明确拒绝的事。
  */
 export function openIntentRequests(state: RunState, atMs: number): RunState {
   if (state.phase === 'ended') return state;
 
-  const asking = new Set(state.agentRequests.map((request) => request.factionId));
+  const pending = new Set(
+    state.agentRequests.filter((r) => r.kind === 'intent').map((r) => r.combatantId),
+  );
   const added: AgentRequest[] = [];
+  let seq = state.nextRequestSeq;
 
   for (const combatant of state.encounter.combatants) {
     if (combatant.hp <= 0 || combatant.intent !== null) continue;
-    if (asking.has(combatant.factionId)) continue;
-    asking.add(combatant.factionId);
+    if (pending.has(combatant.id)) continue;
     added.push({
       kind: 'intent',
-      id: `intent:${combatant.id}:${atMs}:${added.length}`,
+      id: `r${seq++}`,
       factionId: combatant.factionId,
       combatantId: combatant.id,
       requestedAtMs: atMs,
@@ -48,7 +52,11 @@ export function openIntentRequests(state: RunState, atMs: number): RunState {
   }
 
   if (added.length === 0) return state;
-  return { ...state, agentRequests: [...state.agentRequests, ...added] };
+  return {
+    ...state,
+    nextRequestSeq: seq,
+    agentRequests: [...state.agentRequests, ...added],
+  };
 }
 
 /** 清空所有待回答的提问。回合推进或 Encounter 结束时用——旧问题不该跨局面存活。 */

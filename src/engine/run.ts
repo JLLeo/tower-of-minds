@@ -83,6 +83,7 @@ export function startRun(
       rng,
       agents: builtInAgents(),
       agentRequests: [],
+      nextRequestSeq: 0,
       floor: 1,
       phase: 'in_encounter',
       encounter,
@@ -153,11 +154,10 @@ const SCALABLE: ReadonlySet<Effect['kind']> = new Set([
 
 function scaleEffects(effects: readonly Effect[], multiplier: number): readonly Effect[] {
   if (multiplier === 1) return effects;
-  return effects.map((effect) =>
-    SCALABLE.has(effect.kind)
-      ? { ...effect, amount: Math.max(1, Math.round(effect.amount * multiplier)) }
-      : effect,
-  );
+  return effects.map((effect) => {
+    if (!SCALABLE.has(effect.kind) || !('amount' in effect)) return effect;
+    return { ...effect, amount: Math.max(1, Math.round(effect.amount * multiplier)) };
+  });
 }
 
 // ---------------------------------------------------------------- 只读查询
@@ -205,11 +205,12 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
   const definition = definitionOf(state, instanceId);
   if (!card || !definition) return state;
 
+  // 这张牌先离开手牌，但**不立刻进弃牌堆**——结算完才进去。否则「回收」这类
+  // 效果会把正在结算的这张牌自己捡回来。
   const player: PlayerState = {
     ...encounter.player,
     energy: encounter.player.energy - definition.cost,
     hand: encounter.player.hand.filter((c) => c.instanceId !== instanceId),
-    discardPile: [...encounter.player.discardPile, card],
   };
 
   const target = targetId ?? livingCombatants(state)[0]?.id;
@@ -229,7 +230,7 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
         executionUsedThisTurn: true,
         lastGrade: null,
         pending: {
-          cardInstanceId: card.instanceId,
+          card,
           spec: definition.execution,
           openedAtMs: atMs,
           remainingEffects: effects,
@@ -239,8 +240,19 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
   }
 
   return checkOutcome(
-    applyEffects({ ...state, journal, encounter: { ...encounter, player } }, effects),
+    discard(
+      applyEffects({ ...state, journal, encounter: { ...encounter, player } }, effects),
+      card,
+    ),
   );
+}
+
+/** 结算完毕，这张牌落进弃牌堆。 */
+function discard(state: RunState, card: CardInstance): RunState {
+  return withPlayer(state, {
+    ...state.encounter.player,
+    discardPile: [...state.encounter.player.discardPile, card],
+  });
 }
 
 function applyEffects(state: RunState, effects: readonly Effect[]): RunState {
@@ -373,8 +385,17 @@ function absorb(block: number, amount: number): { block: number; dealt: number }
   return { block: block - absorbed, dealt: amount - absorbed };
 }
 
-function takeHit(combatant: CombatantState, amount: number, ignoreBlock: boolean): CombatantState {
-  const exposed = combatant.statuses.exposed;
+/**
+ * respectsExposed 为 false 时跳过易伤：反伤这类被动伤害不该把玩家攒下的「破绽」
+ * 花掉——那个加成是留给玩家自己下一击的。
+ */
+function takeHit(
+  combatant: CombatantState,
+  amount: number,
+  ignoreBlock: boolean,
+  respectsExposed = true,
+): CombatantState {
+  const exposed = respectsExposed && combatant.statuses.exposed;
   const incoming = exposed ? Math.round(amount * 1.5) : amount;
   const statuses: Statuses = exposed ? { ...combatant.statuses, exposed: false } : combatant.statuses;
 
@@ -400,7 +421,9 @@ function resolvePending(state: RunState, atMs: number): RunState {
     journal: [...state.journal, `判定：${GRADE_LABEL[grade]}（×${multiplier}）。`],
     encounter: { ...encounter, phase: 'player_turn', pending: null, lastGrade: grade },
   };
-  return checkOutcome(applyEffects(resumed, scaleEffects(pending.remainingEffects, multiplier)));
+  return checkOutcome(
+    discard(applyEffects(resumed, scaleEffects(pending.remainingEffects, multiplier)), pending.card),
+  );
 }
 
 /**
@@ -458,7 +481,7 @@ function endTurn(state: RunState, atMs: number): RunState {
       journal.push(`${combatant.name}进攻，造成 ${dealt} 点伤害。`);
 
       if (player.statuses.thorns > 0) {
-        after = takeHit(after, player.statuses.thorns, false);
+        after = takeHit(after, player.statuses.thorns, false, false);
         journal.push(`荆棘反弹 ${player.statuses.thorns} 点伤害。`);
       }
       combatants[i] = after;

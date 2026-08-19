@@ -1,4 +1,4 @@
-import { describeAtoms } from '../engine/atoms.js';
+import { atomTableForPrompt, describeAtoms } from '../engine/atoms.js';
 import { CARD_POOL } from '../engine/content.js';
 import type { AgentProvider, AgentTask } from './provider.js';
 
@@ -16,6 +16,9 @@ const SYSTEM_PROMPT = `你在一款卡牌 roguelike 里扮演塔中的一个角�
 清单之外的任何东西都会被引擎丢弃。
 用 JSON 回答，形如 {"actionId": "<清单里的 id>", "line": "<一句不超过 20 字的台词>"}。
 台词要反映你的动机，不要复述动作本身。
+
+所有牌都由固定的 Atom 组成，没有别的东西：
+${atomTableForPrompt()}
 
 对手用的牌来自这个固定卡池：
 ${CARD_POOL_LINES}`;

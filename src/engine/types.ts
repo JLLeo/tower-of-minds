@@ -151,8 +151,8 @@ export type Effect =
       readonly amount: number;
       readonly turns: number;
     }
-  | { readonly kind: 'apply_expose'; readonly targetId: string; readonly amount: number }
-  | { readonly kind: 'apply_weaken'; readonly targetId: string; readonly amount: number }
+  | { readonly kind: 'apply_expose'; readonly targetId: string }
+  | { readonly kind: 'apply_weaken'; readonly targetId: string }
   | { readonly kind: 'draw_cards'; readonly amount: number }
   | { readonly kind: 'gain_energy'; readonly amount: number }
   | { readonly kind: 'recall_card'; readonly amount: number };
@@ -189,7 +189,8 @@ export const NO_STATUSES: Statuses = {
  * 的计算归引擎，UI 只上报时刻。Grade 本身在 #3 落地。
  */
 export interface PendingExecution {
-  readonly cardInstanceId: string;
+  /** 正在结算的那张牌。它此刻既不在手上也不在弃牌堆——结算完才会落进弃牌堆。 */
+  readonly card: CardInstance;
   readonly spec: ExecutionSpec;
   readonly openedAtMs: number;
   readonly remainingEffects: readonly Effect[];
@@ -224,6 +225,8 @@ export interface RunState {
    * 发生在层间——那时并没有 Encounter 在进行。
    */
   readonly agentRequests: readonly AgentRequest[];
+  /** 提问编号，单调递增。它保证 requestId 不会因为同一毫秒发生两次提问而撞车。 */
+  readonly nextRequestSeq: number;
   readonly floor: number;
   readonly phase: RunPhase;
   readonly encounter: EncounterState;
