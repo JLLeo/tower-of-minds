@@ -7,6 +7,7 @@ import {
   intendedAction,
   isPlayerActing,
 } from '../engine/run.js';
+import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
 export type Dispatch = (input: PlayerInput) => void;
@@ -119,11 +120,9 @@ function playerView(state: RunState): HTMLElement {
 }
 
 function describe(definition: CardDefinition): string {
-  const parts: string[] = [];
-  if (definition.damage !== undefined) parts.push(`造成 ${definition.damage} 伤害`);
-  if (definition.block !== undefined) parts.push(`获得 ${definition.block} 格挡`);
+  const parts = [describeAtoms(definition.atoms)];
   if (definition.execution) parts.push('需要时机判定');
-  return parts.join('，');
+  return parts.filter((part) => part.length > 0).join('；');
 }
 
 function handView(state: RunState, dispatch: Dispatch): HTMLElement {
@@ -138,6 +137,7 @@ function handView(state: RunState, dispatch: Dispatch): HTMLElement {
     button.disabled = !canPlay(state, card.instanceId);
     button.appendChild(el('span', 'card-cost', String(definition.cost)));
     button.appendChild(el('span', 'card-name', definition.name));
+    button.appendChild(el('span', 'card-atoms', atomGlyphs(definition.atoms)));
     button.appendChild(el('span', 'card-text', describe(definition)));
     button.addEventListener('click', () =>
       dispatch({ type: 'play_card', instanceId: card.instanceId, atMs: performance.now() }),

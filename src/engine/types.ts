@@ -17,13 +17,18 @@ export interface ExecutionSpec {
 /** 一次 Execution Check 的结果档位。Miss 只是打折，不反噬。 */
 export type ExecutionGrade = 'miss' | 'good' | 'perfect';
 
+/**
+ * Card 由 Atom 组成——Atom 是唯一的真相来源，cost / type / execution 全部由它推出，
+ * 没有一处是手写的。这是 Fusion 的结果可预估、可平衡的前提（ADR-0005）。
+ */
 export interface CardDefinition {
   readonly id: string;
   readonly name: string;
-  readonly type: CardType;
+  /** 内容分组：这张 Base Card 属于哪个 Faction 的牌组。Faction 系统本身见 #10。 */
+  readonly faction: string;
+  readonly atoms: readonly string[];
   readonly cost: number;
-  readonly damage?: number;
-  readonly block?: number;
+  readonly type: CardType;
   readonly execution?: ExecutionSpec;
 }
 
@@ -67,6 +72,7 @@ export interface CombatantState {
   readonly block: number;
   readonly actions: readonly CombatantAction[];
   readonly intent: Intent | null;
+  readonly statuses: Statuses;
 }
 
 /**
@@ -93,14 +99,62 @@ export interface PlayerState {
   readonly hand: readonly CardInstance[];
   readonly drawPile: readonly CardInstance[];
   readonly discardPile: readonly CardInstance[];
+  readonly statuses: Statuses;
 }
 
 // ---------------------------------------------------------------- Resolution
 
-/** 一次 Card 结算被拆成的原子效果，逐个执行，可以在中途挂起。 */
+/**
+ * 一次 Card 结算被拆成的原子效果，逐个执行，可以在中途挂起。
+ * 每种效果都有 amount，但只有伤害与护体类会被 Execution Grade 的倍率缩放——
+ * 抽牌和能量不该因为手抖就变成半张牌。
+ */
 export type Effect =
-  | { readonly kind: 'damage'; readonly targetId: string; readonly amount: number }
-  | { readonly kind: 'gain_block'; readonly amount: number };
+  | {
+      readonly kind: 'damage';
+      readonly targetId: string;
+      readonly amount: number;
+      readonly hits: number;
+      readonly ignoreBlock: boolean;
+    }
+  | { readonly kind: 'gain_block'; readonly amount: number }
+  | { readonly kind: 'gain_thorns'; readonly amount: number }
+  | { readonly kind: 'gain_endure'; readonly amount: number }
+  | {
+      readonly kind: 'apply_burn';
+      readonly targetId: string;
+      readonly amount: number;
+      readonly turns: number;
+    }
+  | { readonly kind: 'apply_expose'; readonly targetId: string; readonly amount: number }
+  | { readonly kind: 'apply_weaken'; readonly targetId: string; readonly amount: number }
+  | { readonly kind: 'draw_cards'; readonly amount: number }
+  | { readonly kind: 'gain_energy'; readonly amount: number }
+  | { readonly kind: 'recall_card'; readonly amount: number };
+
+/** 附着在一个战斗单位身上的持续效果。 */
+export interface Statuses {
+  /** 每回合末结算的灼烧伤害。 */
+  readonly burn: number;
+  readonly burnTurns: number;
+  /** 被近身攻击时反弹的伤害。 */
+  readonly thorns: number;
+  /** 本回合受到的伤害减免，回合开始时清零。 */
+  readonly endure: number;
+  /** 下一次受到的伤害 +50%，触发即消耗。 */
+  readonly exposed: boolean;
+  /** 下一次造成的伤害 -50%，触发即消耗。 */
+  readonly weakened: boolean;
+}
+
+export const NO_STATUSES: Statuses = {
+  burn: 0,
+  burnTurns: 0,
+  thorns: 0,
+  endure: 0,
+  exposed: false,
+  weakened: false,
+};
 
 /**
  * 结算进行到一半、正在等待实时输入时的落点（ADR-0002）。

@@ -1,4 +1,5 @@
-import { createRng, shuffle, type Rng } from './rng.js';
+import { createRng, nextInt, shuffle, type Rng } from './rng.js';
+import { effectsOf } from './atoms.js';
 import {
   CARD_POOL,
   HAND_SIZE,
@@ -8,11 +9,13 @@ import {
   STARTING_DECK,
   floorOneCombatants,
 } from './content.js';
+import { NO_STATUSES } from './types.js';
 import type {
   CardDefinition,
   CardInstance,
   CombatantAction,
   CombatantState,
+  Statuses,
   Effect,
   EncounterState,
   ExecutionGrade,
@@ -54,6 +57,7 @@ export function startRun(
     hand: [],
     drawPile,
     discardPile: [],
+    statuses: NO_STATUSES,
   };
   const [rng, player] = draw(rngAfterShuffle, fresh, HAND_SIZE);
 
@@ -132,12 +136,21 @@ function gradeFor(spec: ExecutionSpec, elapsedMs: number): ExecutionGrade {
   return 'miss';
 }
 
+/** 只缩放伤害与护体类效果——抽牌和能量不该因为手抖就变成半张牌。 */
+const SCALABLE: ReadonlySet<Effect['kind']> = new Set([
+  'damage',
+  'gain_block',
+  'gain_thorns',
+  'apply_burn',
+]);
+
 function scaleEffects(effects: readonly Effect[], multiplier: number): readonly Effect[] {
   if (multiplier === 1) return effects;
-  return effects.map((effect) => ({
-    ...effect,
-    amount: Math.round(effect.amount * multiplier),
-  }));
+  return effects.map((effect) =>
+    SCALABLE.has(effect.kind)
+      ? { ...effect, amount: Math.max(1, Math.round(effect.amount * multiplier)) }
+      : effect,
+  );
 }
 
 // ---------------------------------------------------------------- Intent
@@ -313,7 +326,7 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
   };
 
   const target = targetId ?? livingCombatants(state)[0]?.id;
-  const effects = effectsOf(definition, target);
+  const effects = effectsOf(definition.atoms, target);
   const journal = [...state.journal, `你打出「${definition.name}」。`];
 
   // ADR-0002：需要实时输入的 Card 在这里把结算挂起，剩下的效果等输入回来再执行。
@@ -343,48 +356,146 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
   );
 }
 
-function effectsOf(definition: CardDefinition, targetId: string | undefined): readonly Effect[] {
-  const effects: Effect[] = [];
-  if (definition.damage !== undefined && targetId !== undefined) {
-    effects.push({ kind: 'damage', targetId, amount: definition.damage });
-  }
-  if (definition.block !== undefined) {
-    effects.push({ kind: 'gain_block', amount: definition.block });
-  }
-  return effects;
+function applyEffects(state: RunState, effects: readonly Effect[]): RunState {
+  let next = state;
+  for (const effect of effects) next = applyEffect(next, effect);
+  return next;
 }
 
-function applyEffects(state: RunState, effects: readonly Effect[]): RunState {
-  let encounter = state.encounter;
+function applyEffect(state: RunState, effect: Effect): RunState {
+  const encounter = state.encounter;
+  const player = encounter.player;
 
-  for (const effect of effects) {
-    if (effect.kind === 'gain_block') {
-      encounter = {
-        ...encounter,
-        player: { ...encounter.player, block: encounter.player.block + effect.amount },
-      };
-      continue;
+  switch (effect.kind) {
+    case 'damage':
+      return dealDamage(state, effect.targetId, effect.amount, effect.hits, effect.ignoreBlock);
+
+    case 'gain_block':
+      return withPlayer(state, { ...player, block: player.block + effect.amount });
+
+    case 'gain_thorns':
+      return withPlayer(state, {
+        ...player,
+        statuses: { ...player.statuses, thorns: player.statuses.thorns + effect.amount },
+      });
+
+    case 'gain_endure':
+      return withPlayer(state, {
+        ...player,
+        statuses: { ...player.statuses, endure: player.statuses.endure + effect.amount },
+      });
+
+    case 'apply_burn':
+      return withCombatant(state, effect.targetId, (c) => ({
+        ...c,
+        statuses: {
+          ...c.statuses,
+          burn: c.statuses.burn + effect.amount,
+          burnTurns: Math.max(c.statuses.burnTurns, effect.turns),
+        },
+      }));
+
+    case 'apply_expose':
+      return withCombatant(state, effect.targetId, (c) => ({
+        ...c,
+        statuses: { ...c.statuses, exposed: true },
+      }));
+
+    case 'apply_weaken':
+      return withCombatant(state, effect.targetId, (c) => ({
+        ...c,
+        statuses: { ...c.statuses, weakened: true },
+      }));
+
+    case 'gain_energy':
+      return withPlayer(state, { ...player, energy: player.energy + effect.amount });
+
+    case 'draw_cards': {
+      const [rng, drawn] = draw(state.rng, player, effect.amount);
+      return { ...withPlayer(state, drawn), rng };
     }
-    encounter = {
-      ...encounter,
-      combatants: encounter.combatants.map((combatant) =>
-        combatant.id === effect.targetId ? takeHit(combatant, effect.amount) : combatant,
-      ),
+
+    case 'recall_card':
+      return recall(state, effect.amount);
+  }
+}
+
+function withPlayer(state: RunState, player: PlayerState): RunState {
+  return { ...state, encounter: { ...state.encounter, player } };
+}
+
+function withCombatant(
+  state: RunState,
+  id: string,
+  update: (combatant: CombatantState) => CombatantState,
+): RunState {
+  return {
+    ...state,
+    encounter: {
+      ...state.encounter,
+      combatants: state.encounter.combatants.map((c) => (c.id === id ? update(c) : c)),
+    },
+  };
+}
+
+/** 从弃牌堆随机取回若干张。随机走 state.rng，所以同一 seed 的结果可复现。 */
+function recall(state: RunState, count: number): RunState {
+  let player = state.encounter.player;
+  let rng = state.rng;
+
+  for (let i = 0; i < count; i++) {
+    if (player.discardPile.length === 0) break;
+    const [nextRng, index] = nextInt(rng, player.discardPile.length);
+    rng = nextRng;
+    const card = player.discardPile[index];
+    if (!card) break;
+    player = {
+      ...player,
+      hand: [...player.hand, card],
+      discardPile: player.discardPile.filter((_, i2) => i2 !== index),
     };
   }
 
-  return { ...state, encounter };
+  return { ...withPlayer(state, player), rng };
 }
 
-/** 格挡先吃伤害，剩下的进 HP。玩家和 Combatant 用的是同一套算法。 */
+/**
+ * 一次伤害效果可以拆成多段。分段对着格挡更吃亏、对着空门更划算——`multi` 的取舍
+ * 就在这里，而 #5 的节奏连击会按段给判定。
+ */
+function dealDamage(
+  state: RunState,
+  targetId: string,
+  amount: number,
+  hits: number,
+  ignoreBlock: boolean,
+): RunState {
+  return withCombatant(state, targetId, (combatant) => {
+    let current = combatant;
+    for (let i = 0; i < hits; i++) {
+      if (current.hp <= 0) break;
+      current = takeHit(current, amount, ignoreBlock);
+    }
+    return current;
+  });
+}
+
+/** 格挡先吃伤害，剩下的进 HP。易伤在第一段伤害上触发并消耗。 */
 function absorb(block: number, amount: number): { block: number; dealt: number } {
   const absorbed = Math.min(block, amount);
   return { block: block - absorbed, dealt: amount - absorbed };
 }
 
-function takeHit(combatant: CombatantState, amount: number): CombatantState {
-  const { block, dealt } = absorb(combatant.block, amount);
-  return { ...combatant, block, hp: Math.max(0, combatant.hp - dealt) };
+function takeHit(combatant: CombatantState, amount: number, ignoreBlock: boolean): CombatantState {
+  const exposed = combatant.statuses.exposed;
+  const incoming = exposed ? Math.round(amount * 1.5) : amount;
+  const statuses: Statuses = exposed ? { ...combatant.statuses, exposed: false } : combatant.statuses;
+
+  if (ignoreBlock) {
+    return { ...combatant, statuses, hp: Math.max(0, combatant.hp - incoming) };
+  }
+  const { block, dealt } = absorb(combatant.block, incoming);
+  return { ...combatant, statuses, block, hp: Math.max(0, combatant.hp - dealt) };
 }
 
 // ---------------------------------------------------------------- 结算挂起的恢复
@@ -447,14 +558,43 @@ function endTurn(state: RunState, atMs: number): RunState {
       continue;
     }
     if (action.kind === 'attack') {
-      const { block, dealt } = absorb(player.block, action.amount);
+      // 虚弱先砍一半，坚忍再减一截，最后才轮到格挡。
+      const raw = combatant.statuses.weakened ? Math.round(action.amount * 0.5) : action.amount;
+      const reduced = Math.max(0, raw - player.statuses.endure);
+      const { block, dealt } = absorb(player.block, reduced);
       player = { ...player, block, hp: Math.max(0, player.hp - dealt) };
-      combatants[i] = acted;
+
+      let after: CombatantState = {
+        ...acted,
+        statuses: { ...acted.statuses, weakened: false },
+      };
       journal.push(`${combatant.name}进攻，造成 ${dealt} 点伤害。`);
+
+      if (player.statuses.thorns > 0) {
+        after = takeHit(after, player.statuses.thorns, false);
+        journal.push(`荆棘反弹 ${player.statuses.thorns} 点伤害。`);
+      }
+      combatants[i] = after;
     } else {
       combatants[i] = { ...acted, block: action.amount };
       journal.push(`${combatant.name}架起 ${action.amount} 点格挡。`);
     }
+  }
+
+  // 回合末结算灼烧。
+  for (let i = 0; i < combatants.length; i++) {
+    const combatant = combatants[i];
+    if (!combatant || combatant.hp <= 0) continue;
+    const { burn, burnTurns } = combatant.statuses;
+    if (burn <= 0 || burnTurns <= 0) continue;
+
+    const remaining = burnTurns - 1;
+    combatants[i] = {
+      ...combatant,
+      hp: Math.max(0, combatant.hp - burn),
+      statuses: { ...combatant.statuses, burnTurns: remaining, burn: remaining > 0 ? burn : 0 },
+    };
+    journal.push(`${combatant.name}被灼烧，受到 ${burn} 点伤害。`);
   }
 
   const afterCombatants = checkOutcome({
@@ -466,7 +606,13 @@ function endTurn(state: RunState, atMs: number): RunState {
 
   const [rng, refreshed] = draw(
     afterCombatants.rng,
-    { ...player, block: 0, energy: player.maxEnergy },
+    {
+      ...player,
+      block: 0,
+      energy: player.maxEnergy,
+      // 坚忍只管本回合；荆棘持续整场。
+      statuses: { ...player.statuses, endure: 0 },
+    },
     HAND_SIZE,
   );
 

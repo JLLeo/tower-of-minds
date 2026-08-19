@@ -1,20 +1,14 @@
+import { describeAtoms } from '../engine/atoms.js';
 import { CARD_POOL } from '../engine/content.js';
 import type { IntentContext, IntentProvider } from './provider.js';
 
-function describeCard(card: (typeof CARD_POOL)[number]): string {
-  const parts: string[] = [];
-  if (card.damage !== undefined) parts.push(`造成 ${card.damage} 伤害`);
-  if (card.block !== undefined) parts.push(`获得 ${card.block} 格挡`);
-  return parts.join('，');
-}
-
 const CARD_POOL_LINES = CARD_POOL.map(
-  (card) => `- ${card.name}（${card.cost} 费）：${describeCard(card)}`,
+  (card) => `- ${card.name}（${card.cost} 费）：${describeAtoms(card.atoms)}`,
 ).join('\n');
 
 /**
  * 稳定前缀：规则、回答格式与固定卡池。它在所有请求、所有 Agent 之间完全一致，
- * 因此能命中 context cache——实测 224 个输入 token 里有 128 个走缓存价。
+ * 因此能命中 context cache。
  * 任何按局变化的东西都必须留到 user 消息里，否则前缀失效、成本翻倍。
  */
 const SYSTEM_PROMPT = `你在一款卡牌 roguelike 里扮演塔中的一个角色。

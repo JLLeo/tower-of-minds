@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { applyInput, canPlay, definitionOf, isPlayerActing, startRun } from './run.js';
-import { BUILT_IN_GENERATION, STARTING_DECK } from './content.js';
-import type { PlayerInput, RunOptions, RunState } from './types.js';
+import { ATOMS, MAX_ATOMS_PER_CARD } from './atoms.js';
+import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
+import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
 const SEED = 20260818;
 
@@ -41,6 +42,25 @@ function scriptInputs(start: RunState, maxSteps = 500): PlayerInput[] {
     state = applyInput(state, input);
   }
   return inputs;
+}
+
+/** 一副由同一张牌堆成的 Deck，让手牌内容可预测。 */
+const deckOf = (id: string): RunOptions => ({
+  startingDeck: Array.from({ length: 10 }, () => id),
+  startedAtMs: 0,
+});
+
+function playCardById(state: RunState, definitionId: string, atMs = 100): RunState {
+  const card = state.encounter.player.hand.find((c) => c.instanceId.startsWith(definitionId + '#'));
+  if (!card) throw new Error('手上没有 ' + definitionId);
+  return applyInput(state, { type: 'play_card', instanceId: card.instanceId, atMs });
+}
+
+/** 打出一张会挂起判定的牌，并以 Good 的时机接上——倍率为 1，数值好断言。 */
+function playAndResolve(state: RunState, definitionId: string): RunState {
+  const suspended = playCardById(state, definitionId, 0);
+  if (suspended.encounter.phase !== 'awaiting_execution') return suspended;
+  return applyInput(suspended, pressAt(suspended, 0.5));
 }
 
 function run(inputs: readonly PlayerInput[], options?: RunOptions): RunState {
@@ -461,5 +481,208 @@ describe('Execution Check：档位与倍率', () => {
   it('既没有挂起结算、也没到 Intent 截止点时，tick 是空操作', () => {
     const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
     expect(applyInput(state, { type: 'tick', atMs: 100 })).toBe(state);
+  });
+});
+
+describe('Atom 系统', () => {
+  it('费用由 Atom 权重推出，不是手写的', () => {
+    const byId = new Map(CARD_POOL.map((card) => [card.id, card]));
+
+    expect(byId.get('strike')?.cost).toBe(1); // strike(3) -> ceil(3/3)
+    expect(byId.get('heavy')?.cost).toBe(2); // strike(3)+pierce(3) -> ceil(6/3)
+    expect(byId.get('bulwark')?.cost).toBe(2); // guard(3)+endure(2) -> ceil(5/3)
+    expect(byId.get('flurry')?.cost).toBe(1); // multi(2) -> ceil(2/3)
+  });
+
+  it('Card Type 由主导 Atom 推出', () => {
+    const byId = new Map(CARD_POOL.map((card) => [card.id, card]));
+
+    expect(byId.get('strike')?.type).toBe('attack');
+    expect(byId.get('guard')?.type).toBe('shield');
+    expect(byId.get('siphon')?.type).toBe('spell');
+    expect(byId.get('bulwark')?.type).toBe('shield');
+  });
+
+  it('每个 Faction 各有 10 张 Base Card', () => {
+    const counts = new Map<string, number>();
+    for (const card of CARD_POOL) counts.set(card.faction, (counts.get(card.faction) ?? 0) + 1);
+
+    expect(counts.get('red-ring')).toBe(10);
+    expect(counts.get('green-vine')).toBe(10);
+  });
+
+  it('Base Card 不含 Forbidden Atom，也不超过 Atom 上限', () => {
+    const forbidden = new Set(ATOMS.filter((a) => a.forbidden).map((a) => a.id));
+
+    for (const card of CARD_POOL) {
+      expect(card.atoms.length).toBeGreaterThan(0);
+      expect(card.atoms.length).toBeLessThanOrEqual(MAX_ATOMS_PER_CARD);
+      for (const atom of card.atoms) expect(forbidden.has(atom)).toBe(false);
+    }
+  });
+
+  it('Forbidden Atom 权重为负，所以突变产物更强也更便宜', () => {
+    const forbidden = ATOMS.filter((a) => a.forbidden);
+    expect(forbidden.length).toBeGreaterThan(0);
+    for (const atom of forbidden) expect(atom.weight).toBeLessThan(0);
+  });
+
+  it('尚未落地的 Atom 参与费用，但不出现在任何 Base Card 上', () => {
+    const pending = ATOMS.filter((a) => a.pendingTicket && !a.forbidden);
+    expect(pending.length).toBeGreaterThan(0);
+    for (const atom of pending) expect(atom.weight).toBeGreaterThan(0);
+
+    const pendingIds = new Set(pending.map((a) => a.id));
+    for (const card of CARD_POOL) {
+      for (const atom of card.atoms) expect(pendingIds.has(atom)).toBe(false);
+    }
+  });
+});
+
+describe('Atom 效果', () => {
+  const foeOf = (state: RunState): CombatantState => state.encounter.combatants[0]!;
+
+  function answerWith(state: RunState, actionId: string): RunState {
+    return applyInput(state, {
+      type: 'intent_response',
+      combatantId: 'tower-guard',
+      requestedAtMs: state.encounter.intentRequest!.requestedAtMs,
+      payload: { actionId, line: '' },
+    });
+  }
+
+  it('pierce 无视格挡', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('rend'));
+    state = answerWith(state, 'brace');
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+    expect(foeOf(state).block).toBe(5);
+
+    const before = foeOf(state).hp;
+    const after = playCardById(state, 'rend');
+
+    expect(foeOf(after).hp).toBe(before - 4);
+    expect(foeOf(after).block).toBe(5);
+  });
+
+  it('multi 的分段不会绕过格挡：格挡在各段之间共享', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('flurry'));
+
+    const bare = playCardById(state, 'flurry');
+    expect(foeOf(bare).hp).toBe(foeOf(state).hp - 6); // 3 段各 2
+
+    state = answerWith(state, 'brace');
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+    const guardedHp = foeOf(state).hp;
+    const blocked = playCardById(state, 'flurry');
+
+    // 6 点总伤害对 5 点格挡，漏过去 1 点——和一次性打 6 点是一样的
+    expect(foeOf(blocked).hp).toBe(guardedHp - 1);
+  });
+
+  it('multi 打易伤更亏：加成只被第一段吃掉', () => {
+    const deck = {
+      startingDeck: ['crack', 'flurry', 'strike', 'crack', 'flurry', 'strike', 'crack', 'flurry', 'strike', 'strike'],
+      startedAtMs: 0,
+    };
+    const opened = startRun(BUILT_IN_GENERATION, SEED, deck);
+    const before = foeOf(opened).hp;
+
+    const exposed = playCardById(opened, 'crack');
+    // 分段：3 + 2 + 2 = 7
+    expect(foeOf(playCardById(exposed, 'flurry')).hp).toBe(before - 7);
+    // 一次性：round(6 * 1.5) = 9
+    expect(foeOf(playCardById(exposed, 'strike')).hp).toBe(before - 9);
+  });
+
+  it('burn 在回合末结算，并按回合数递减', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('ignite'));
+    const before = foeOf(state).hp;
+
+    state = playCardById(state, 'ignite');
+    expect(foeOf(state).hp).toBe(before);
+    expect(foeOf(state).statuses.burn).toBe(3);
+
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+    expect(foeOf(state).hp).toBe(before - 3);
+
+    state = applyInput(state, { type: 'end_turn', atMs: 2000 });
+    expect(foeOf(state).hp).toBe(before - 6);
+    expect(foeOf(state).statuses.burn).toBe(0);
+
+    state = applyInput(state, { type: 'end_turn', atMs: 3000 });
+    expect(foeOf(state).hp).toBe(before - 6);
+  });
+
+  it('expose 让下一次伤害 +50%，且只生效一次', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, {
+      startingDeck: ['crack', 'strike', 'strike', 'crack', 'strike', 'strike', 'strike', 'crack', 'strike', 'strike'],
+      startedAtMs: 0,
+    });
+    const before = foeOf(state).hp;
+
+    state = playCardById(state, 'crack');
+    expect(foeOf(state).statuses.exposed).toBe(true);
+
+    state = playCardById(state, 'strike');
+    expect(foeOf(state).hp).toBe(before - 9);
+    expect(foeOf(state).statuses.exposed).toBe(false);
+
+    state = playCardById(state, 'strike');
+    expect(foeOf(state).hp).toBe(before - 15);
+  });
+
+  it('weaken 让对手下次攻击减半', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('sap'));
+    state = answerWith(state, 'slash');
+    const hpBefore = state.encounter.player.hp;
+
+    state = playCardById(state, 'sap');
+    expect(foeOf(state).statuses.weakened).toBe(true);
+
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+    expect(state.encounter.player.hp).toBe(hpBefore - 4);
+    expect(foeOf(state).statuses.weakened).toBe(false);
+  });
+
+  it('thorns 在对手攻击时反弹', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('bramble'));
+    state = answerWith(state, 'slash');
+
+    state = playAndResolve(state, 'bramble');
+    expect(state.encounter.player.statuses.thorns).toBe(3);
+    const foeHp = foeOf(state).hp;
+
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+    expect(foeOf(state).hp).toBe(foeHp - 3);
+  });
+
+  it('endure 减免本回合伤害，回合结束后清零', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('brace'));
+    state = answerWith(state, 'slash');
+    const hpBefore = state.encounter.player.hp;
+
+    state = playAndResolve(state, 'brace');
+    expect(state.encounter.player.statuses.endure).toBe(2);
+
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+    expect(state.encounter.player.hp).toBe(hpBefore - 5);
+    expect(state.encounter.player.statuses.endure).toBe(0);
+  });
+
+  it('draw 抽牌、surge 给能量、recall 从弃牌堆取回', () => {
+    let siphon = startRun(BUILT_IN_GENERATION, SEED, deckOf('siphon'));
+    const handBefore = siphon.encounter.player.hand.length;
+    siphon = playCardById(siphon, 'siphon');
+    expect(siphon.encounter.player.hand.length).toBe(handBefore);
+
+    let surged = startRun(BUILT_IN_GENERATION, SEED, deckOf('surge'));
+    const energyBefore = surged.encounter.player.energy;
+    surged = playCardById(surged, 'surge');
+    expect(surged.encounter.player.energy).toBe(energyBefore);
+
+    let glean = startRun(BUILT_IN_GENERATION, SEED, deckOf('glean'));
+    glean = playCardById(glean, 'glean');
+    expect(glean.encounter.player.discardPile.length).toBe(0);
+    expect(glean.encounter.player.hand.length).toBe(5);
   });
 });

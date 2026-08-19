@@ -281,3 +281,10 @@ button.primary:disabled {
 .combatant-thinking {
   opacity: 0.6;
 }
+
+.card-atoms {
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  color: var(--accent);
+  opacity: 0.85;
+}
