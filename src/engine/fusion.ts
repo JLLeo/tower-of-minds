@@ -1,6 +1,6 @@
 import { MAX_ATOMS_PER_CARD, atomOf, cardTypeOf, costOf } from './atoms.js';
-import { fusionTasteOf } from './content.js';
-import type { CardDefinition, CardType, ExecutionSpec } from './types.js';
+import { executionForType, fusionTasteOf } from './content.js';
+import type { CardDefinition, RunState } from './types.js';
 
 /**
  * Fusion 与 Mutation。
@@ -20,24 +20,64 @@ export function exceedsCapacity(atoms: readonly string[]): boolean {
   return atoms.length > MAX_ATOMS_PER_CARD;
 }
 
-/** 超出上限时，这一方会先舍弃哪个 Atom。合法集就是这些 Atom 本身。 */
+/**
+ * 超出上限时，这一方会先舍弃哪个 Atom。合法集就是这些 Atom 本身。
+ *
+ * sheds 里没列到的轴表示「这一方舍不得」，排到最后——**不能用 indexOf 的 -1**，
+ * 那会让没列到的轴反而排在最前面，于是赤环第一个丢掉的是伤害原子，与它的性格完全相反。
+ */
 export function preferredDrop(factionId: string, atoms: readonly string[]): string | undefined {
   const taste = fusionTasteOf(factionId);
+  const rankOf = (axis: string): number => {
+    const index = taste.sheds.indexOf(axis as never);
+    return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
+  };
+
   const ranked = [...atoms].sort((left, right) => {
     const a = atomOf(left);
     const b = atomOf(right);
-    const axisA = a ? taste.sheds.indexOf(a.axis) : -1;
-    const axisB = b ? taste.sheds.indexOf(b.axis) : -1;
+    const axisA = a ? rankOf(a.axis) : -1;
+    const axisB = b ? rankOf(b.axis) : -1;
     if (axisA !== axisB) return axisA - axisB; // 越靠前越先舍弃
     return (a?.weight ?? 0) - (b?.weight ?? 0); // 同轴则先舍弃更轻的
   });
   return ranked[0];
 }
 
+/**
+ * 按这一方的偏好一路丢到装得下为止。
+ *
+ * 只丢一个是不够的：一张已经顶到上限的融合产物再融一次会有 6 个 Atom，
+ * 丢掉一个还剩 5——这样反复融下去 Card 会无限膨胀，而 ADR-0005 把「单卡至多 4 个 Atom」
+ * 定成了引擎的固定资产。
+ */
+export function trimToCapacity(
+  factionId: string,
+  atoms: readonly string[],
+  capacity = MAX_ATOMS_PER_CARD,
+): readonly string[] {
+  let kept = [...atoms];
+  while (kept.length > capacity) {
+    const drop = preferredDrop(factionId, kept);
+    const index = drop ? kept.indexOf(drop) : -1;
+    if (index < 0) break;
+    kept = kept.filter((_, i) => i !== index);
+  }
+  return kept;
+}
+
 /** 过载时这一方会塞进来的 Forbidden Atom。 */
 export function preferredForbidden(factionId: string): string {
   return fusionTasteOf(factionId).forbidden;
 }
+
+/**
+ * 过载后这张牌能装多少个 Atom：比上限多一个。
+ *
+ * 「过载」不是「一个都不丢」——那样反复融合会无限膨胀。它换来的是**一个额外的位置**，
+ * 而那个位置装的正是禁忌 Atom。
+ */
+export const OVERLOAD_CAPACITY = MAX_ATOMS_PER_CARD + 1;
 
 /** 名字兜底：模型没给或给了不像话的东西时用。 */
 export function fallbackName(a: string, b: string, mutated: boolean): string {
@@ -50,9 +90,6 @@ export interface ForgeInput {
   readonly atoms: readonly string[];
   readonly name: string;
   readonly factionId: string;
-  /** 过载产物：它不受 Atom 上限约束，那正是「过载」的意思。 */
-  readonly mutated: boolean;
-  readonly executionByType: Partial<Record<CardType, ExecutionSpec>>;
   readonly seq: number;
 }
 
@@ -62,7 +99,7 @@ export interface ForgeInput {
  */
 export function forgeCard(input: ForgeInput): CardDefinition {
   const type = cardTypeOf(input.atoms);
-  const execution = input.executionByType[type];
+  const execution = executionForType(type);
   return {
     id: `forged-${input.seq}`,
     name: input.name,
@@ -71,6 +108,43 @@ export function forgeCard(input: ForgeInput): CardDefinition {
     cost: costOf(input.atoms),
     type,
     ...(execution ? { execution } : {}),
+  };
+}
+
+/**
+ * 锻好一张牌，把被融掉的那张从 Deck 里换出去。
+ *
+ * Fusion 有两条路进来——不超上限时引擎自己锻，超了则由 Agent 取舍后再锻——
+ * 但落地只有这一处，免得两边各自维护一份 Deck 交换与编号逻辑。
+ */
+export function applyForge(
+  state: RunState,
+  input: {
+    readonly atoms: readonly string[];
+    readonly name: string;
+    readonly factionId: string;
+    readonly deckInstanceId: string;
+    readonly note: string;
+  },
+): RunState {
+  const forged = forgeCard({
+    atoms: input.atoms,
+    name: input.name,
+    factionId: input.factionId,
+    seq: state.forged.length,
+  });
+
+  return {
+    ...state,
+    phase: 'choosing_favor',
+    favor: { factionId: input.factionId, tier: 'high', choices: [] },
+    forged: [...state.forged, forged],
+    deck: [
+      ...state.deck.filter((card) => card.instanceId !== input.deckInstanceId),
+      { instanceId: `${forged.id}#${state.nextCardSeq}`, definitionId: forged.id },
+    ],
+    nextCardSeq: state.nextCardSeq + 1,
+    journal: [...state.journal, input.note.replace('{name}', forged.name)],
   };
 }
 

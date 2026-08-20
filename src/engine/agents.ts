@@ -1,11 +1,11 @@
 import { atomOf } from './atoms.js';
-import { INTENT_TIMEOUT_MS, executionForType } from './content.js';
+import { FUSION_TIMEOUT_MS, INTENT_TIMEOUT_MS } from './content.js';
 import {
+  applyForge,
   fallbackName,
-  forgeCard,
-  preferredDrop,
   preferredForbidden,
   sanitizeName,
+  trimToCapacity,
 } from './fusion.js';
 import { PLAYER_TARGET } from './types.js';
 import type {
@@ -122,9 +122,6 @@ function settle(
 
 // ---------------------------------------------------------------- fusion
 
-/** 融合的提问允许等多久。玩家在等，所以比战斗里更短一点也无妨。 */
-const FUSION_TIMEOUT_MS = 3000;
-
 /** 挂出一次融合提问：由这一方决定取舍与命名。 */
 export function openFusionRequest(
   state: RunState,
@@ -174,43 +171,36 @@ function settleFusion(
     const proposed = record['forbiddenAtomId'];
     const legal = typeof proposed === 'string' && atomOf(proposed)?.forbidden === true;
     const forbidden = legal ? proposed : preferredForbidden(request.factionId);
-    atoms = [...request.atoms, forbidden];
+    // 过载换来的是一个额外的位置，不是「一个都不丢」——否则反复融合会无限膨胀。
+    atoms = [...trimToCapacity(request.factionId, request.atoms), forbidden];
     chosenByAgent = legal;
   } else {
     const proposed = record['dropAtomId'];
     const legal = typeof proposed === 'string' && request.atoms.includes(proposed);
-    const dropped = legal ? proposed : preferredDrop(request.factionId, request.atoms);
-    const index = request.atoms.indexOf(dropped ?? '');
-    atoms = index >= 0 ? request.atoms.filter((_, i) => i !== index) : request.atoms;
+    if (legal) {
+      const index = request.atoms.indexOf(proposed);
+      atoms = trimToCapacity(
+        request.factionId,
+        request.atoms.filter((_, i) => i !== index),
+      );
+    } else {
+      atoms = trimToCapacity(request.factionId, request.atoms);
+    }
     chosenByAgent = legal;
   }
 
-  const forged = forgeCard({
+  const who = state.agents.find((a) => a.factionId === request.factionId)?.name ?? '对方';
+  const note = chosenByAgent
+    ? `${who}替你做了取舍，锻出「{name}」。`
+    : `${who}没有给出说得通的取舍，按它一贯的偏好锻出「{name}」。`;
+
+  return applyForge(state, {
     atoms,
     name,
     factionId: request.factionId,
-    mutated: request.overload,
-    executionByType: { attack: executionForType('attack'), shield: executionForType('shield'), spell: executionForType('spell') },
-    seq: state.forged.length,
+    deckInstanceId: request.deckInstanceId,
+    note,
   });
-
-  const who = state.agents.find((a) => a.factionId === request.factionId)?.name ?? '对方';
-  const note = chosenByAgent
-    ? `${who}替你做了取舍，锻出「${forged.name}」。`
-    : `${who}没有给出说得通的取舍，按它一贯的偏好锻出「${forged.name}」。`;
-
-  return {
-    ...state,
-    phase: 'choosing_favor',
-    favor: { factionId: request.factionId, tier: 'high', choices: [] },
-    forged: [...state.forged, forged],
-    deck: [
-      ...state.deck.filter((card) => card.instanceId !== request.deckInstanceId),
-      { instanceId: `${forged.id}#${state.nextCardSeq}`, definitionId: forged.id },
-    ],
-    nextCardSeq: state.nextCardSeq + 1,
-    journal: [...state.journal, note],
-  };
 }
 
 function settleIntent(

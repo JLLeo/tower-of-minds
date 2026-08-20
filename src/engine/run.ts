@@ -16,7 +16,7 @@ import {
   openIntentRequests,
   receiveResponse,
 } from './agents.js';
-import { exceedsCapacity, fallbackName, forgeCard, mergeAtoms } from './fusion.js';
+import { applyForge, exceedsCapacity, fallbackName, mergeAtoms } from './fusion.js';
 import { PLAYER_TARGET } from './types.js';
 import {
   CARD_POOL,
@@ -29,7 +29,6 @@ import {
   baseCardsOf,
   builtInAgents,
   combatantsForFloor,
-  executionForType,
 } from './content.js';
 import { NO_STATUSES } from './types.js';
 import type {
@@ -920,14 +919,15 @@ function startFusion(
 
   const atoms = mergeAtoms(mineDefinition.atoms, offered.atoms);
 
-  // 没超上限就没有取舍可做，过载也无从谈起。
-  if (!exceedsCapacity(atoms) && !overload) {
-    return finishFusion(state, {
+  // 没超上限就没有取舍可做——过载也一样无从谈起，那时它只是白送一个禁忌 Atom。
+  // 界面上按钮是藏起来的，但判断权归引擎（ADR-0001）。
+  if (!exceedsCapacity(atoms)) {
+    return applyForge(state, {
       atoms,
+      name: fallbackName(mineDefinition.name, offered.name, false),
       factionId: offer.factionId,
-      names: [mineDefinition.name, offered.name],
       deckInstanceId,
-      mutated: false,
+      note: '两张牌融成了「{name}」。',
     });
   }
 
@@ -942,43 +942,6 @@ function startFusion(
     },
     atMs,
   );
-}
-
-/** 不需要取舍的那种融合：引擎直接锻出来。 */
-function finishFusion(
-  state: RunState,
-  input: {
-    atoms: readonly string[];
-    factionId: string;
-    names: readonly [string, string];
-    deckInstanceId: string;
-    mutated: boolean;
-  },
-): RunState {
-  const forged = forgeCard({
-    atoms: input.atoms,
-    name: fallbackName(input.names[0], input.names[1], input.mutated),
-    factionId: input.factionId,
-    mutated: input.mutated,
-    executionByType: {
-      attack: executionForType('attack'),
-      shield: executionForType('shield'),
-      spell: executionForType('spell'),
-    },
-    seq: state.forged.length,
-  });
-
-  return {
-    ...state,
-    favor: { factionId: input.factionId, tier: 'high', choices: [] },
-    forged: [...state.forged, forged],
-    deck: [
-      ...state.deck.filter((card) => card.instanceId !== input.deckInstanceId),
-      { instanceId: `${forged.id}#${state.nextCardSeq}`, definitionId: forged.id },
-    ],
-    nextCardSeq: state.nextCardSeq + 1,
-    journal: [...state.journal, `两张牌合成了「${forged.name}」。`],
-  };
 }
 
 /** 收下（或放弃）这一层的报酬，然后上一层。 */

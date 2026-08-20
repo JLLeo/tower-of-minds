@@ -11,7 +11,6 @@ import {
   startRun,
 } from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
-import { preferredDrop, preferredForbidden } from './fusion.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
 import { PLAYER_TARGET } from './types.js';
 import type { FusionRequest, IntentRequest } from './types.js';
@@ -1534,7 +1533,7 @@ describe('Fusion 与 Mutation', () => {
     expect(forged.atoms).toHaveLength(request.atoms.length - 1);
   });
 
-  it('过载会塞进一个禁忌 Atom，一个都不丢，而且更便宜', () => {
+  it('过载换来的是一个额外的位置，装的正是禁忌 Atom', () => {
     const { asking, request } = atOverflow(true);
     expect(request.overload).toBe(true);
 
@@ -1543,15 +1542,99 @@ describe('Fusion 与 Mutation', () => {
 
     const forbidden = forged.atoms.filter((id) => ATOMS.find((a) => a.id === id)?.forbidden);
     expect(forbidden).toHaveLength(1);
-    expect(forged.atoms).toHaveLength(request.atoms.length + 1);
-    expect(forged.cost).toBeLessThanOrEqual(costOf(request.atoms));
+    // 比上限多一个，而不是无限膨胀
+    expect(forged.atoms).toHaveLength(MAX_ATOMS_PER_CARD + 1);
+    // 禁忌权重为负，所以多这一个 Atom 不会让它更贵（费用取整时可能持平）
+    expect(forged.cost).toBeLessThanOrEqual(
+      costOf(forged.atoms.filter((id) => !forbidden.includes(id))),
+    );
   });
 
-  it('不同 Faction 的取舍与突变不一样', () => {
-    expect(preferredDrop('red-ring', ['strike', 'guard', 'draw'])).not.toBe(
-      preferredDrop('green-vine', ['strike', 'guard', 'draw']),
-    );
-    expect(preferredForbidden('red-ring')).not.toBe(preferredForbidden('green-vine'));
+  it('过载的三条回退路径也各自成立', () => {
+    const { asking, request } = atOverflow(true);
+
+    const outcomes = [
+      applyInput(asking, { type: 'tick', atMs: 40_000 + request.timeoutMs }),
+      applyInput(asking, {
+        type: 'agent_response',
+        requestId: request.id,
+        payload: { forbiddenAtomId: 'strike', name: '不是禁忌' }, // 不是 Forbidden Atom
+      }),
+      applyInput(asking, { type: 'agent_response', requestId: request.id, payload: 42 }),
+    ];
+
+    for (const outcome of outcomes) {
+      expect(outcome.phase).toBe('choosing_favor');
+      const forged = outcome.forged[1]!;
+      expect(forged.atoms.filter((id) => ATOMS.find((a) => a.id === id)?.forbidden)).toHaveLength(1);
+      expect(forged.atoms).toHaveLength(MAX_ATOMS_PER_CARD + 1);
+    }
+  });
+
+  it('反复融合不会让一张牌无限膨胀', () => {
+    // 这条守的是 ADR-0005 的「单卡至多 4 个 Atom」：只丢一个是不够的，
+    // 一张顶到上限的产物再融一次会有 6 个，丢一个还剩 5。
+    let state = atHighFavor();
+    for (let round = 0; round < 3 && state.phase !== 'ended'; round++) {
+      const fattest = [...state.deck].sort(
+        (a, b) =>
+          (cardById(state, b.definitionId)?.atoms.length ?? 0) -
+          (cardById(state, a.definitionId)?.atoms.length ?? 0),
+      )[0]!;
+      state = fuse(state, fattest.instanceId, false, 30_000 + round * 1000);
+
+      const request = state.agentRequests.find((r): r is FusionRequest => r.kind === 'fusion');
+      if (request) {
+        state = applyInput(state, {
+          type: 'tick',
+          atMs: 30_000 + round * 1000 + request.timeoutMs,
+        });
+      }
+      for (const forged of state.forged) {
+        expect(forged.atoms.length).toBeLessThanOrEqual(MAX_ATOMS_PER_CARD);
+      }
+
+      state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 35_000 + round * 1000 });
+      if (state.phase === 'in_encounter') state = clearFloor(state);
+    }
+  });
+
+  it('同样两张牌，找不同派系融会得到不同的牌', () => {
+    // 这条经 seam 断言，不去戳内部函数——正因为之前那条直接测偏好函数的测试，
+    // 一个把偏好顺序弄反了的 bug 才溜了过去。
+    const atoms = ['strike', 'pierce', 'guard', 'draw', 'burn'];
+    const forge = (factionId: string): readonly string[] => {
+      const base = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+      const request: FusionRequest = {
+        kind: 'fusion',
+        id: 'r0',
+        factionId,
+        requestedAtMs: 0,
+        timeoutMs: 1000,
+        atoms,
+        overload: false,
+        sourceNames: ['甲', '乙'],
+        deckInstanceId: base.deck[0]!.instanceId,
+      };
+      const asking: RunState = {
+        ...base,
+        phase: 'fusing',
+        favor: { factionId, tier: 'high', choices: [] },
+        agentRequests: [request],
+      };
+      const done = applyInput(asking, { type: 'tick', atMs: 5000 });
+      return done.forged[0]!.atoms;
+    };
+
+    const red = forge('red-ring');
+    const green = forge('green-vine');
+
+    expect(red).not.toEqual(green);
+    // 赤环留下杀伤力：伤害轴的 Atom 一个不少
+    expect(red).toContain('strike');
+    expect(red).toContain('pierce');
+    // 青蔓留下的是活下去的东西
+    expect(green).toContain('guard');
   });
 
   it('融合产物只属于这一局：Run 结束就没了（ADR-0009）', () => {

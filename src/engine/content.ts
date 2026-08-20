@@ -245,6 +245,9 @@ export function fusionTasteOf(factionId: string): FusionTaste {
 /** 一次 IntentRequest 允许等待多久。实测中位延迟约 1 秒，这里留足余量。 */
 export const INTENT_TIMEOUT_MS = 2500;
 
+/** 一次融合提问允许等待多久。玩家在层间干等着，所以留的余量比战斗里更大一点。 */
+export const FUSION_TIMEOUT_MS = 3500;
+
 /** Generation 失败时的内置局势，也是本票唯一的局势（#10 起才真正生成）。 */
 export const BUILT_IN_GENERATION: Generation = {
   title: '围城中的塔',
