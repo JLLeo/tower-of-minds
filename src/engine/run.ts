@@ -53,10 +53,7 @@ export function startRun(
 ): RunState {
   const deckIds = options.startingDeck ?? STARTING_DECK;
   const startedAtMs = options.startedAtMs ?? 0;
-  const deck: readonly CardInstance[] = deckIds.map((id, index) => ({
-    instanceId: `${id}#${index}`,
-    definitionId: id,
-  }));
+  const deck: readonly CardInstance[] = deckIds.map((id, index) => mintCard(id, index));
 
   const seeded: RunState = {
     seed,
@@ -64,6 +61,7 @@ export function startRun(
     agents: builtInAgents(),
     agentRequests: [],
     nextRequestSeq: 0,
+    nextCardSeq: deckIds.length,
     floor: 0,
     deck,
     standing: {},
@@ -75,6 +73,14 @@ export function startRun(
   };
 
   return beginEncounter(seeded, 1, PLAYER_MAX_HP, startedAtMs);
+}
+
+/**
+ * Deck 里每张牌的身份。序号单调递增，不依赖「Deck 只会变长」——#13 的 Fusion 会
+ * 从 Deck 里拿走牌，那时按长度取号就会撞车。
+ */
+function mintCard(definitionId: string, seq: number): CardInstance {
+  return { instanceId: `${definitionId}#${seq}`, definitionId };
 }
 
 /** 还没有 Encounter 时的占位。startRun 立刻会用真正的第一层覆盖它。 */
@@ -214,6 +220,11 @@ function scaleEffects(effects: readonly Effect[], multiplier: number): readonly 
 // ---------------------------------------------------------------- 只读查询
 // 渲染层通过这些函数读状态，自己不重新推导任何规则。
 
+/** 按定义 id 查一张 Card。渲染层用它，不自己去翻卡池。 */
+export function cardById(definitionId: string): CardDefinition | undefined {
+  return CARD_POOL.find((card) => card.id === definitionId);
+}
+
 export function definitionOf(state: RunState, instanceId: string): CardDefinition | undefined {
   const card =
     state.encounter.player.hand.find((c) => c.instanceId === instanceId) ??
@@ -245,14 +256,15 @@ export function defaultTarget(state: RunState): string | undefined {
 }
 
 /**
- * 你这一场偏袒了谁：在场的 Faction 里，你打得最少的那个。打得一样多就没有偏袒。
- * #7 的 Favor 与 #8 的 Standing 都从这里读。
+ * **战斗进行中**你正站在谁那边：还活着的 Faction 里，你打得最少的那个。
+ * 打成平手就还没有表态。这是给玩家看的即时反馈——他应该随时知道自己站在哪。
+ *
+ * 它**不是**发 Favor 的规则。一层结束的条件就是「场上只剩一个 Faction」，那一刻
+ * 候选只剩 0 或 1 个，这里的比较无从发生。层间的报酬按 rewardedFaction 走。
  */
-export function favoredFaction(state: RunState): string | null {
-  // 只有还站着的 Faction 才能给你东西——被你打光的那一方没人可以还这个人情。
+export function currentSiding(state: RunState): string | null {
   const alive = [...new Set(livingCombatants(state).map((c) => c.factionId))];
-  if (alive.length === 0) return null;
-  if (alive.length === 1) return alive[0] ?? null;
+  if (alive.length < 2) return alive[0] ?? null;
 
   const scored = alive
     .map((factionId) => ({ factionId, damage: state.encounter.damageDealtTo[factionId] ?? 0 }))
@@ -262,6 +274,18 @@ export function favoredFaction(state: RunState): string | null {
   const runnerUp = scored[1];
   if (!best || !runnerUp || best.damage === runnerUp.damage) return null;
   return best.factionId;
+}
+
+/**
+ * 一层结束时，欠你人情的是**你留下来的那一方**。
+ *
+ * 这不是「你打得最少的那一方」——听起来更细腻，但那条规则在这里根本触发不到：
+ * 层是在只剩一个 Faction 时结束的。把话说清楚，好过留一段永远走不到的分支。
+ * 全灭则没有人欠你人情。
+ */
+function rewardedFaction(state: RunState): string | null {
+  const alive = [...new Set(livingCombatants(state).map((c) => c.factionId))];
+  return alive.length === 1 ? (alive[0] ?? null) : null;
 }
 
 /** 某个 Agent 这一回合打算做的事，供界面显示。还没定下来时返回 undefined。 */
@@ -759,12 +783,13 @@ function clearFloor(state: RunState): RunState {
     };
   }
 
-  const offer = buildFavor(state);
-  const standing = offer.factionId
-    ? { ...state.standing, [offer.factionId]: (state.standing[offer.factionId] ?? 0) + 1 }
+  const factionId = rewardedFaction(state);
+  const standing = factionId
+    ? { ...state.standing, [factionId]: (state.standing[factionId] ?? 0) + 1 }
     : state.standing;
+  const offer = buildFavor(state, factionId, standing);
 
-  const agentName = state.agents.find((a) => a.factionId === offer.factionId)?.name;
+  const agentName = state.agents.find((a) => a.factionId === factionId)?.name;
   return {
     ...state,
     phase: 'choosing_favor',
@@ -781,19 +806,22 @@ function clearFloor(state: RunState): RunState {
  * 这一层的报酬。给的人是你偏袒过的那一方；给多少取决于它还剩几个人——
  * 你保得越好，它给得越大方。打成平手就没有人欠你人情。
  */
-function buildFavor(state: RunState): FavorOffer {
-  const factionId = favoredFaction(state);
+function buildFavor(
+  state: RunState,
+  factionId: string | null,
+  standing: Readonly<Record<string, number>>,
+): FavorOffer {
   if (!factionId) return { factionId: '', tier: 'basic', choices: [] };
 
+  // 给多少取决于这一方还剩几个人——你保得越好，它给得越大方。
   const survivors = state.encounter.combatants.filter(
     (c) => c.hp > 0 && c.factionId === factionId,
   ).length;
-  const count = Math.min(3, Math.max(1, survivors));
+  const count = Math.max(1, survivors);
 
   const pool = baseCardsOf(factionId).map((card) => card.id);
   const [, shuffled] = shuffle(state.rng, pool);
-  const tier =
-    (state.standing[factionId] ?? 0) + 1 >= HIGH_FAVOR_THRESHOLD ? 'high' : 'basic';
+  const tier = (standing[factionId] ?? 0) >= HIGH_FAVOR_THRESHOLD ? 'high' : 'basic';
 
   // 高阶 Favor 本该给的是一次 Fusion 机会而不是一张牌——那是 #13。
   return { factionId, tier, choices: shuffled.slice(0, count) };
@@ -815,12 +843,10 @@ function takeFavor(state: RunState, cardId: string | null, atMs: number): RunSta
   if (!offer) return state;
   if (cardId !== null && !offer.choices.includes(cardId)) return state;
 
-  const deck = cardId
-    ? [...state.deck, { instanceId: `${cardId}#${state.deck.length}`, definitionId: cardId }]
-    : state.deck;
+  const deck = cardId ? [...state.deck, mintCard(cardId, state.nextCardSeq)] : state.deck;
   const journal = [...state.journal];
   if (cardId) {
-    journal.push(`你收下了「${CARD_POOL.find((c) => c.id === cardId)?.name ?? cardId}」。`);
+    journal.push(`你收下了「${cardById(cardId)?.name ?? cardId}」。`);
   }
 
   const player = state.encounter.player;
@@ -831,5 +857,10 @@ function takeFavor(state: RunState, cardId: string | null, atMs: number): RunSta
     journal.push(`${who}替你处理了伤口，恢复 ${healed - player.hp} 点生命。`);
   }
 
-  return beginEncounter({ ...state, deck, journal }, state.floor + 1, healed, atMs);
+  return beginEncounter(
+    { ...state, deck, journal, nextCardSeq: state.nextCardSeq + (cardId ? 1 : 0) },
+    state.floor + 1,
+    healed,
+    atMs,
+  );
 }

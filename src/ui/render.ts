@@ -3,13 +3,15 @@ import {
   GRADE_LABEL,
   PERFECT_BAND,
   canPlay,
+  cardById,
+  currentSiding,
   defaultTarget,
   definitionOf,
   intendedAction,
   isPlayerActing,
 } from '../engine/run.js';
 import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
-import { CARD_POOL, NORMAL_FLOORS } from '../engine/content.js';
+import { NORMAL_FLOORS } from '../engine/content.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
@@ -72,12 +74,29 @@ function header(state: RunState): HTMLElement {
   const standing = Object.entries(state.standing)
     .map(([factionId, value]) => `${factionNameOf(state, factionId)} ${value}`)
     .join(' · ');
-  return el(
-    'header',
-    'header',
-    `Tower of Minds — 第 ${state.floor}/${NORMAL_FLOORS} 层 · 回合 ${state.encounter.turn}` +
-      (standing ? `　|　人情：${standing}` : ''),
+
+  const wrap = el('header', 'header');
+  wrap.appendChild(
+    el(
+      'span',
+      undefined,
+      `Tower of Minds — 第 ${state.floor}/${NORMAL_FLOORS} 层 · 回合 ${state.encounter.turn}` +
+        (standing ? `　|　态度：${standing}` : ''),
+    ),
   );
+
+  // 你此刻站在谁那边。玩家应该随时知道这件事，而不是打完才发现。
+  if (state.phase === 'in_encounter') {
+    const siding = currentSiding(state);
+    wrap.appendChild(
+      el(
+        'div',
+        'siding',
+        siding ? `你正站在${factionNameOf(state, siding)}这边` : '你还没有偏向任何一方',
+      ),
+    );
+  }
+  return wrap;
 }
 
 /** 层间的报酬：由你偏袒过的那一方给，选一张进 Deck，也可以不要。 */
@@ -97,7 +116,7 @@ function favorView(state: RunState, dispatch: Dispatch): HTMLElement {
 
   const row = el('div', 'hand');
   for (const cardId of offer.choices) {
-    const definition = CARD_POOL.find((card) => card.id === cardId);
+    const definition = cardById(cardId);
     if (!definition) continue;
     const button = document.createElement('button');
     button.className = `card card-${definition.type}`;

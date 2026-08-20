@@ -319,3 +319,9 @@ button.primary:disabled {
   margin: 0;
   font-size: 16px;
 }
+
+.siding {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--accent);
+}

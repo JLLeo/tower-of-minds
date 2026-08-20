@@ -83,7 +83,7 @@ _Avoid_: QTE, 小游戏, minigame
 一次 Execution Check 的结果档位：Miss / Good / Perfect。Miss 只是打折，不会反噬。
 
 **Favor**:
-Encounter 结束后，由玩家在场上偏袒过的 Faction 提供的 Card 奖励，分阶。高阶 Favor 不是给一张牌，而是给一次 Fusion 的机会——所以融合是忠诚的回报，不是随手可得的东西。
+Encounter 结束后，由玩家留下来的那一方提供的报酬：若干张可选的 Card，外加替他处理伤口。给多少取决于这一方还剩几个人。分阶——高阶 Favor 不是给一张牌，而是给一次 Fusion 的机会，所以融合是忠诚的回报，不是随手可得的东西。
 _Avoid_: 战利品, reward, drop
 
 **Fusion**:

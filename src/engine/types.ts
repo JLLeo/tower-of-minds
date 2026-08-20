@@ -251,6 +251,8 @@ export interface RunState {
   readonly agentRequests: readonly AgentRequest[];
   /** 提问编号，单调递增。它保证 requestId 不会因为同一毫秒发生两次提问而撞车。 */
   readonly nextRequestSeq: number;
+  /** Card 实例的编号，单调递增。Fusion 会从 Deck 里拿走牌，所以不能按长度取号。 */
+  readonly nextCardSeq: number;
   readonly floor: number;
   /**
    * 玩家这一 Run 的 Deck，跨 Floor 累积。每场 Encounter 把它洗进抽牌堆；

@@ -3,7 +3,7 @@ import {
   applyInput,
   canPlay,
   definitionOf,
-  favoredFaction,
+  currentSiding,
   isPlayerActing,
   startRun,
 } from './run.js';
@@ -412,8 +412,21 @@ describe('完整一场', () => {
     // 不需要清场：只要场上不再有两个敌对 Faction，剩下的那一方就放你过去
     const living = state.encounter.combatants.filter((c) => c.hp > 0);
     expect(new Set(living.map((c) => c.factionId)).size).toBeLessThanOrEqual(1);
-    // Deck 跨层累积：起始 10 张，每层收一张
-    expect(state.deck.length).toBeGreaterThan(10);
+    // Deck 跨层累积，且多出来的每一张都来自某个 Faction 的 Base Card
+    expect(state.deck.length).toBeGreaterThan(STARTING_DECK.length);
+    const startingCounts = new Map<string, number>();
+    for (const id of STARTING_DECK) startingCounts.set(id, (startingCounts.get(id) ?? 0) + 1);
+    const gained: string[] = [];
+    const seen = new Map(startingCounts);
+    for (const card of state.deck) {
+      const left = seen.get(card.definitionId) ?? 0;
+      if (left > 0) seen.set(card.definitionId, left - 1);
+      else gained.push(card.definitionId);
+    }
+    expect(gained.length).toBe(state.deck.length - STARTING_DECK.length);
+    for (const id of gained) expect(CARD_POOL.some((card) => card.id === id)).toBe(true);
+    // 实例 id 不重复
+    expect(new Set(state.deck.map((c) => c.instanceId)).size).toBe(state.deck.length);
   });
 
   it('同一 seed 加同一串输入必然得到同一个 Run', () => {
@@ -937,7 +950,7 @@ describe('多方混战与站队', () => {
 
   it('玩家打谁被记进站队账本，偏袒的是挨打最少的那一方', () => {
     let state = fresh(deckOf('strike'));
-    expect(favoredFaction(state)).toBeNull(); // 还没出手，谈不上偏袒
+    expect(currentSiding(state)).toBeNull(); // 还没出手，谈不上偏袒
 
     const scout = state.encounter.player.hand[0]!;
     state = applyInput(state, {
@@ -950,7 +963,7 @@ describe('多方混战与站队', () => {
     expect(state.encounter.damageDealtTo['green-vine']).toBe(6);
     expect(state.encounter.damageDealtTo['red-ring']).toBeUndefined();
     // 打了青蔓，就是站在赤环那边
-    expect(favoredFaction(state)).toBe('red-ring');
+    expect(currentSiding(state)).toBe('red-ring');
   });
 
   it('灼烧造成的伤害也算进站队账本', () => {
@@ -968,7 +981,7 @@ describe('多方混战与站队', () => {
     state = applyInput(allDefend(state), { type: 'end_turn', atMs: 1000 });
 
     expect(state.encounter.damageDealtTo['green-vine']).toBe(3);
-    expect(favoredFaction(state)).toBe('red-ring');
+    expect(currentSiding(state)).toBe('red-ring');
   });
 
   it('被打光的 Faction 不会被算作你偏袒的一方——它没人可以还这个人情', () => {
@@ -993,7 +1006,7 @@ describe('多方混战与站队', () => {
     expect(at(state, SCOUT).hp).toBe(0);
     // 玩家一点都没打赤环，但偏袒的只能是还站着的那一方
     expect(state.encounter.damageDealtTo['red-ring']).toBeUndefined();
-    expect(favoredFaction(state)).toBe('red-ring');
+    expect(currentSiding(state)).toBe('red-ring');
   });
 
   it('打成平手就没有偏袒', () => {
@@ -1010,7 +1023,7 @@ describe('多方混战与站队', () => {
 
     expect(state.encounter.damageDealtTo['green-vine']).toBe(6);
     expect(state.encounter.damageDealtTo['red-ring']).toBe(6);
-    expect(favoredFaction(state)).toBeNull();
+    expect(currentSiding(state)).toBeNull();
   });
 
   it('打光一方就能走：剩下的那一方放你过去，不需要清场', () => {
@@ -1039,7 +1052,7 @@ describe('多方混战与站队', () => {
     expect(at(state, GUARD).hp).toBeGreaterThan(0);
     expect(at(state, ARCHER).hp).toBeGreaterThan(0);
     expect(at(state, SCOUT).hp).toBe(0);
-    expect(favoredFaction(state)).toBe('red-ring');
+    expect(currentSiding(state)).toBe('red-ring');
   });
 });
 
@@ -1130,6 +1143,15 @@ describe('多 Floor 推进与 Favor', () => {
 
     expect(state.standing['red-ring']).toBe(2);
     expect(state.favor?.tier).toBe('high');
+  });
+
+  it('保下的人越多，它给得越大方', () => {
+    const bothAlive = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    // 赤环两人都活着
+    expect(
+      bothAlive.encounter.combatants.filter((c) => c.hp > 0 && c.factionId === 'red-ring'),
+    ).toHaveLength(2);
+    expect(bothAlive.favor?.choices).toHaveLength(2);
   });
 
   it('欠你人情的那一方会替你包扎', () => {
