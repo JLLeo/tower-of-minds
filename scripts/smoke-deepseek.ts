@@ -85,6 +85,40 @@ for (let i = 1; i <= rounds; i++) {
   }
 }
 
+// 融合的取舍与命名：这功能的门面，值得看模型实际给什么。
+console.log('\n' + '— 融合取舍 —');
+for (const factionId of ['red-ring', 'green-vine']) {
+  const base = startRun(BUILT_IN_GENERATION, 1, { startedAtMs: 0 });
+  const atoms = ['strike', 'pierce', 'guard', 'draw', 'burn'];
+  const request = {
+    kind: 'fusion' as const,
+    id: 'smoke-fusion',
+    factionId,
+    requestedAtMs: 0,
+    timeoutMs: 3000,
+    atoms,
+    overload: false,
+    sourceNames: ['重击', '灼心'] as readonly [string, string],
+    deckInstanceId: 'x',
+  };
+  const task = taskFor({ ...base, agentRequests: [request] }, request);
+  if (!task) continue;
+
+  const startedAt = performance.now();
+  try {
+    const payload = (await provider.ask(task, new AbortController().signal)) as Record<string, unknown>;
+    const drop = payload?.['dropAtomId'];
+    const legal = typeof drop === 'string' && atoms.includes(drop);
+    const who = base.agents.find((a) => a.factionId === factionId)?.name;
+    console.log(
+      `  ${who}  ${Math.round(performance.now() - startedAt)}ms  ` +
+        `${legal ? '合法' : '非法'}  丢掉 ${String(drop)}  取名「${String(payload?.['name'])}」`,
+    );
+  } catch (error) {
+    console.log(`  ${factionId} 调用失败 :: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
 if (timings.length === 0) {
   console.log('\n没有一次成功的调用。');
   process.exit(1);

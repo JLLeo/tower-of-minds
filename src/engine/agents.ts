@@ -1,10 +1,19 @@
-import { INTENT_TIMEOUT_MS } from './content.js';
+import { atomOf } from './atoms.js';
+import { INTENT_TIMEOUT_MS, executionForType } from './content.js';
+import {
+  fallbackName,
+  forgeCard,
+  preferredDrop,
+  preferredForbidden,
+  sanitizeName,
+} from './fusion.js';
 import { PLAYER_TARGET } from './types.js';
 import type {
   AgentRequest,
   AgentRequestKind,
   CombatantAction,
   CombatantState,
+  FusionRequest,
   Intent,
   RunState,
 } from './types.js';
@@ -106,7 +115,102 @@ function settle(
   switch (request.kind) {
     case 'intent':
       return settleIntent(withoutRequest, request.combatantId, payload, timedOut);
+    case 'fusion':
+      return settleFusion(withoutRequest, request, payload, timedOut);
   }
+}
+
+// ---------------------------------------------------------------- fusion
+
+/** 融合的提问允许等多久。玩家在等，所以比战斗里更短一点也无妨。 */
+const FUSION_TIMEOUT_MS = 3000;
+
+/** 挂出一次融合提问：由这一方决定取舍与命名。 */
+export function openFusionRequest(
+  state: RunState,
+  request: Omit<FusionRequest, 'kind' | 'id' | 'requestedAtMs' | 'timeoutMs'>,
+  atMs: number,
+): RunState {
+  return {
+    ...state,
+    phase: 'fusing',
+    nextRequestSeq: state.nextRequestSeq + 1,
+    agentRequests: [
+      ...state.agentRequests,
+      {
+        ...request,
+        kind: 'fusion',
+        id: `r${state.nextRequestSeq}`,
+        requestedAtMs: atMs,
+        timeoutMs: FUSION_TIMEOUT_MS,
+      },
+    ],
+  };
+}
+
+/**
+ * 校验这一方的取舍（ADR-0001）。合法集是明确的：
+ * 不过载时只能丢合并后确实存在的那些 Atom；过载时只能挑 Forbidden Atom。
+ * 越界一律拒绝，回退到这一方的性格偏好。
+ */
+function settleFusion(
+  state: RunState,
+  request: FusionRequest,
+  payload: unknown,
+  timedOut: boolean,
+): RunState {
+  const record =
+    !timedOut && typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>)
+      : {};
+
+  const [nameA, nameB] = request.sourceNames;
+  const name = sanitizeName(record['name'], fallbackName(nameA, nameB, request.overload));
+
+  let atoms: readonly string[];
+  let chosenByAgent: boolean;
+
+  if (request.overload) {
+    const proposed = record['forbiddenAtomId'];
+    const legal = typeof proposed === 'string' && atomOf(proposed)?.forbidden === true;
+    const forbidden = legal ? proposed : preferredForbidden(request.factionId);
+    atoms = [...request.atoms, forbidden];
+    chosenByAgent = legal;
+  } else {
+    const proposed = record['dropAtomId'];
+    const legal = typeof proposed === 'string' && request.atoms.includes(proposed);
+    const dropped = legal ? proposed : preferredDrop(request.factionId, request.atoms);
+    const index = request.atoms.indexOf(dropped ?? '');
+    atoms = index >= 0 ? request.atoms.filter((_, i) => i !== index) : request.atoms;
+    chosenByAgent = legal;
+  }
+
+  const forged = forgeCard({
+    atoms,
+    name,
+    factionId: request.factionId,
+    mutated: request.overload,
+    executionByType: { attack: executionForType('attack'), shield: executionForType('shield'), spell: executionForType('spell') },
+    seq: state.forged.length,
+  });
+
+  const who = state.agents.find((a) => a.factionId === request.factionId)?.name ?? '对方';
+  const note = chosenByAgent
+    ? `${who}替你做了取舍，锻出「${forged.name}」。`
+    : `${who}没有给出说得通的取舍，按它一贯的偏好锻出「${forged.name}」。`;
+
+  return {
+    ...state,
+    phase: 'choosing_favor',
+    favor: { factionId: request.factionId, tier: 'high', choices: [] },
+    forged: [...state.forged, forged],
+    deck: [
+      ...state.deck.filter((card) => card.instanceId !== request.deckInstanceId),
+      { instanceId: `${forged.id}#${state.nextCardSeq}`, definitionId: forged.id },
+    ],
+    nextCardSeq: state.nextCardSeq + 1,
+    journal: [...state.journal, note],
+  };
 }
 
 function settleIntent(

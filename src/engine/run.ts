@@ -12,9 +12,11 @@ import {
   dropRequests,
   expireRequests,
   fallbackIntent,
+  openFusionRequest,
   openIntentRequests,
   receiveResponse,
 } from './agents.js';
+import { exceedsCapacity, fallbackName, forgeCard, mergeAtoms } from './fusion.js';
 import { PLAYER_TARGET } from './types.js';
 import {
   CARD_POOL,
@@ -27,6 +29,7 @@ import {
   baseCardsOf,
   builtInAgents,
   combatantsForFloor,
+  executionForType,
 } from './content.js';
 import { NO_STATUSES } from './types.js';
 import type {
@@ -73,6 +76,7 @@ export function startRun(
     nextCardSeq: deckIds.length,
     floor: 0,
     deck,
+    forged: [],
     memories: {},
     favor: null,
     phase: 'in_encounter',
@@ -158,8 +162,14 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
 
 export function applyInput(state: RunState, input: PlayerInput): RunState {
   if (state.phase === 'ended') return state;
-  // 选 Favor 的时候，除了选 Favor 什么都做不了。
-  if (state.phase === 'choosing_favor' && input.type !== 'choose_favor') return state;
+  // 层间：选 Favor 的时候只能选 Favor 或发起融合；等这一方取舍时什么都做不了，
+  // 除了让时间流逝（超时由 tick 判）。
+  if (state.phase === 'choosing_favor' && input.type !== 'choose_favor' && input.type !== 'fuse') {
+    return state;
+  }
+  if (state.phase === 'fusing' && input.type !== 'agent_response' && input.type !== 'tick') {
+    return state;
+  }
 
   switch (input.type) {
     case 'play_card':
@@ -172,6 +182,8 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
       return receiveResponse(state, input.requestId, input.payload);
     case 'choose_favor':
       return takeFavor(state, input.cardId, input.atMs);
+    case 'fuse':
+      return startFusion(state, input.offeredCardId, input.deckInstanceId, input.overload, input.atMs);
     case 'tick':
       return expireRequests(expireIfWindowClosed(state, input.atMs), input.atMs);
   }
@@ -229,9 +241,15 @@ function scaleEffects(effects: readonly Effect[], multiplier: number): readonly 
 // ---------------------------------------------------------------- 只读查询
 // 渲染层通过这些函数读状态，自己不重新推导任何规则。
 
-/** 按定义 id 查一张 Card。渲染层用它，不自己去翻卡池。 */
-export function cardById(definitionId: string): CardDefinition | undefined {
-  return CARD_POOL.find((card) => card.id === definitionId);
+/**
+ * 按定义 id 查一张 Card：固定卡池，加上本局锻出来的那些。
+ * 融合产物是真正的 Card，界面和结算都必须能查到它。
+ */
+export function cardById(state: RunState, definitionId: string): CardDefinition | undefined {
+  return (
+    CARD_POOL.find((card) => card.id === definitionId) ??
+    state.forged.find((card) => card.id === definitionId)
+  );
 }
 
 export function definitionOf(state: RunState, instanceId: string): CardDefinition | undefined {
@@ -240,7 +258,7 @@ export function definitionOf(state: RunState, instanceId: string): CardDefinitio
     state.encounter.player.drawPile.find((c) => c.instanceId === instanceId) ??
     state.encounter.player.discardPile.find((c) => c.instanceId === instanceId);
   if (!card) return undefined;
-  return CARD_POOL.find((d) => d.id === card.definitionId);
+  return cardById(state, card.definitionId);
 }
 
 /** 现在是否轮到玩家出牌。等 Intent 不会挡住玩家——Run 永远不因模型停下。 */
@@ -770,6 +788,7 @@ function checkOutcome(state: RunState): RunState {
       phase: 'ended',
       outcome: 'defeat',
       memories: {},
+      forged: [],
       agentRequests: [],
       encounter: { ...encounter, phase: 'ended', pending: null },
       journal: [...state.journal, '你倒在了塔里。'],
@@ -811,6 +830,7 @@ function clearFloor(state: RunState): RunState {
       phase: 'ended',
       outcome: 'victory',
       memories: {},
+      forged: [],
       journal: [...state.journal, '你走到了塔的尽头。'],
     };
   }
@@ -876,6 +896,91 @@ function buildFavor(state: RunState, factionId: string | null): FavorOffer {
  */
 const FAVOR_HEAL: Readonly<Record<FavorOffer['tier'], number>> = { basic: 10, high: 16 };
 
+/**
+ * 发起一次融合：把高阶 Favor 给的那张牌与 Deck 里的一张合并。
+ *
+ * 合并后不超上限就当场锻好——引擎自己算得出来，没必要去打扰模型。超了才需要有人
+ * 取舍，那时才挂出提问；玩家也可以选择过载，把取舍换成一次赌博。
+ */
+function startFusion(
+  state: RunState,
+  offeredCardId: string,
+  deckInstanceId: string,
+  overload: boolean,
+  atMs: number,
+): RunState {
+  if (state.phase !== 'choosing_favor') return state;
+  const offer = state.favor;
+  if (!offer || offer.tier !== 'high' || !offer.choices.includes(offeredCardId)) return state;
+
+  const offered = cardById(state, offeredCardId);
+  const mine = state.deck.find((card) => card.instanceId === deckInstanceId);
+  const mineDefinition = mine ? cardById(state, mine.definitionId) : undefined;
+  if (!offered || !mine || !mineDefinition) return state;
+
+  const atoms = mergeAtoms(mineDefinition.atoms, offered.atoms);
+
+  // 没超上限就没有取舍可做，过载也无从谈起。
+  if (!exceedsCapacity(atoms) && !overload) {
+    return finishFusion(state, {
+      atoms,
+      factionId: offer.factionId,
+      names: [mineDefinition.name, offered.name],
+      deckInstanceId,
+      mutated: false,
+    });
+  }
+
+  return openFusionRequest(
+    state,
+    {
+      factionId: offer.factionId,
+      atoms,
+      overload,
+      sourceNames: [mineDefinition.name, offered.name],
+      deckInstanceId,
+    },
+    atMs,
+  );
+}
+
+/** 不需要取舍的那种融合：引擎直接锻出来。 */
+function finishFusion(
+  state: RunState,
+  input: {
+    atoms: readonly string[];
+    factionId: string;
+    names: readonly [string, string];
+    deckInstanceId: string;
+    mutated: boolean;
+  },
+): RunState {
+  const forged = forgeCard({
+    atoms: input.atoms,
+    name: fallbackName(input.names[0], input.names[1], input.mutated),
+    factionId: input.factionId,
+    mutated: input.mutated,
+    executionByType: {
+      attack: executionForType('attack'),
+      shield: executionForType('shield'),
+      spell: executionForType('spell'),
+    },
+    seq: state.forged.length,
+  });
+
+  return {
+    ...state,
+    favor: { factionId: input.factionId, tier: 'high', choices: [] },
+    forged: [...state.forged, forged],
+    deck: [
+      ...state.deck.filter((card) => card.instanceId !== input.deckInstanceId),
+      { instanceId: `${forged.id}#${state.nextCardSeq}`, definitionId: forged.id },
+    ],
+    nextCardSeq: state.nextCardSeq + 1,
+    journal: [...state.journal, `两张牌合成了「${forged.name}」。`],
+  };
+}
+
 /** 收下（或放弃）这一层的报酬，然后上一层。 */
 function takeFavor(state: RunState, cardId: string | null, atMs: number): RunState {
   if (state.phase !== 'choosing_favor') return state;
@@ -886,7 +991,7 @@ function takeFavor(state: RunState, cardId: string | null, atMs: number): RunSta
   const deck = cardId ? [...state.deck, mintCard(cardId, state.nextCardSeq)] : state.deck;
   const journal = [...state.journal];
   if (cardId) {
-    journal.push(`你收下了「${cardById(cardId)?.name ?? cardId}」。`);
+    journal.push(`你收下了「${cardById(state, cardId)?.name ?? cardId}」。`);
   }
 
   const player = state.encounter.player;

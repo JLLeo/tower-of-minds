@@ -1,4 +1,5 @@
 import { legalTargetsFor } from '../engine/agents.js';
+import { ATOMS, atomOf, describeAtom } from '../engine/atoms.js';
 import { memoryForPrompt, standingOf } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { AgentRequest, AgentState, CombatantState, RunState } from '../engine/types.js';
@@ -14,7 +15,18 @@ export interface ActionOption {
  * 一次提问需要的全部上下文，按 kind 分。Fusion（#13）与层间构筑（#14）各自加一个
  * 成员——宿主的分派点只有这里一处。
  */
-export type AgentTask = {
+export interface AtomOption {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly weight: number;
+}
+
+export type AgentTask =
+  | IntentTask
+  | FusionTask;
+
+export interface IntentTask {
   readonly kind: 'intent';
   readonly agent: AgentState;
   readonly combatant: CombatantState;
@@ -29,7 +41,22 @@ export type AgentTask = {
   readonly playerMaxHp: number;
   readonly playerBlock: number;
   readonly handSize: number;
-};
+}
+
+/** 融合的取舍：丢哪一个 Atom，或者过载时挑哪一个禁忌，以及新牌叫什么。 */
+export interface FusionTask {
+  readonly kind: 'fusion';
+  readonly agent: AgentState;
+  /** 它对你的态度会影响它替你留下什么——这正是「找不同派系融不一样」的一半原因。 */
+  readonly memory: string;
+  readonly standing: number;
+  readonly sourceNames: readonly [string, string];
+  readonly overload: boolean;
+  /** 合并后的全部 Atom。不过载时只能从这里面丢一个。 */
+  readonly atoms: readonly AtomOption[];
+  /** 过载时可选的禁忌 Atom。 */
+  readonly forbidden: readonly AtomOption[];
+}
 
 /**
  * 供应商适配器。它只负责把上下文送出去、把响应原样带回来——解析传输层格式是它的事，
@@ -47,6 +74,31 @@ export function taskFor(state: RunState, request: AgentRequest): AgentTask | und
   if (!agent) return undefined;
 
   switch (request.kind) {
+    case 'fusion': {
+      const describe = (id: string): AtomOption | null => {
+        const atom = atomOf(id);
+        return atom
+          ? { id: atom.id, name: atom.name, description: describeAtom(atom), weight: atom.weight }
+          : null;
+      };
+      const present = request.atoms
+        .map(describe)
+        .filter((option): option is AtomOption => option !== null);
+
+      return {
+        kind: 'fusion',
+        agent,
+        memory: memoryForPrompt(state, request.factionId),
+        standing: standingOf(state, request.factionId),
+        sourceNames: request.sourceNames,
+        overload: request.overload,
+        atoms: present,
+        forbidden: ATOMS.filter((atom) => atom.forbidden)
+          .map((atom) => describe(atom.id))
+          .filter((option): option is AtomOption => option !== null),
+      };
+    }
+
     case 'intent': {
       const combatant = state.encounter.combatants.find((c) => c.id === request.combatantId);
       if (!combatant) return undefined;

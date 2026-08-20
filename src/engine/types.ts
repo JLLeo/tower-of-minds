@@ -113,7 +113,7 @@ export interface AgentState {
  * Fusion（#13）与层间构筑（#14）各自加一个 kind——suspend / validate / fallback
  * 这条路只写一份（ADR-0010）。
  */
-export type AgentRequestKind = 'intent';
+export type AgentRequestKind = 'intent' | 'fusion';
 
 export interface AgentRequestBase {
   /** 唯一标识这一次提问。响应靠它认领，迟到的响应因此认得出来。 */
@@ -128,7 +128,22 @@ export interface IntentRequest extends AgentRequestBase {
   readonly combatantId: string;
 }
 
-export type AgentRequest = IntentRequest;
+/**
+ * 融合超出 Atom 上限时，由提供融合的那个 Faction 的 Agent 决定取舍：
+ * 丢掉哪一个 Atom，或者过载时挑哪一个 Forbidden Atom，以及新 Card 叫什么。
+ */
+export interface FusionRequest extends AgentRequestBase {
+  readonly kind: 'fusion';
+  /** 合并后的全部 Atom。丢弃只能从这里面挑。 */
+  readonly atoms: readonly string[];
+  /** 玩家选了过载：不丢弃，改为塞进一个 Forbidden Atom。 */
+  readonly overload: boolean;
+  readonly sourceNames: readonly [string, string];
+  /** 被融掉的那张牌，结算时从 Deck 里拿走。 */
+  readonly deckInstanceId: string;
+}
+
+export type AgentRequest = IntentRequest | FusionRequest;
 
 /**
  * Player 目前单独建模，因为只有他持有 Deck。#6 的多方混战会让 Player 也变成
@@ -251,7 +266,7 @@ export interface FavorOffer {
   readonly choices: readonly string[];
 }
 
-export type RunPhase = 'in_encounter' | 'choosing_favor' | 'ended';
+export type RunPhase = 'in_encounter' | 'choosing_favor' | 'fusing' | 'ended';
 export type RunOutcome = 'victory' | 'defeat';
 
 export interface RunState {
@@ -281,6 +296,11 @@ export interface RunState {
   readonly memories: Readonly<Record<string, readonly MemoryEntry[]>>;
   /** 正等着玩家挑的那份 Favor。 */
   readonly favor: FavorOffer | null;
+  /**
+   * 本局锻出来的 Card。它们只属于这一局：不进 Unlock Ledger，Run 结束即消失
+   * （ADR-0009）。查一张牌的定义要同时看固定卡池和这里。
+   */
+  readonly forged: readonly CardDefinition[];
   readonly phase: RunPhase;
   readonly encounter: EncounterState;
   readonly outcome: RunOutcome | null;
@@ -311,6 +331,17 @@ export type PlayerInput =
   | { readonly type: 'agent_response'; readonly requestId: string; readonly payload: unknown }
   /** 从 Favor 提供的选项里挑一张牌，然后上一层。 */
   | { readonly type: 'choose_favor'; readonly cardId: string | null; readonly atMs: number }
+  /**
+   * 用高阶 Favor 给的那张牌，和 Deck 里的一张融合。
+   * overload 为 true 表示不丢弃、赌一次 Mutation。
+   */
+  | {
+      readonly type: 'fuse';
+      readonly offeredCardId: string;
+      readonly deckInstanceId: string;
+      readonly overload: boolean;
+      readonly atMs: number;
+    }
   | { readonly type: 'execution_input'; readonly atMs: number }
   /**
    * 时间的流逝。UI 每帧上报当前时刻，引擎据此判断判定窗口是否已经耗尽——

@@ -11,7 +11,7 @@ import {
   intendedAction,
   isPlayerActing,
 } from '../engine/run.js';
-import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
+import { MAX_ATOMS_PER_CARD, atomGlyphs, describeAtoms } from '../engine/atoms.js';
 import { NORMAL_FLOORS } from '../engine/content.js';
 import { describeMemory, summarizeMemory } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
@@ -23,6 +23,10 @@ export type Dispatch = (input: PlayerInput) => void;
 export interface View {
   readonly selectedTargetId: string | null;
   readonly onSelectTarget: (combatantId: string) => void;
+  /** 高阶 Favor 时正在挑的那两张：它给的一张，和你自己牌库里的一张。 */
+  readonly fuseOfferedId: string | null;
+  readonly fuseDeckInstanceId: string | null;
+  readonly onPickFuse: (offeredId: string | null, deckInstanceId: string | null) => void;
 }
 
 /** 上一次渲染留下的时机条动画与按键监听，下一次渲染前必须先拆掉。 */
@@ -52,7 +56,8 @@ export function render(
     controls(state, dispatch),
     memoryView(state),
     journalView(state),
-    ...(state.phase === 'choosing_favor' ? [favorView(state, dispatch)] : []),
+    ...(state.phase === 'choosing_favor' ? [favorView(state, view, dispatch)] : []),
+    ...(state.phase === 'fusing' ? [fusingView(state)] : []),
     ...(state.phase === 'ended' ? [outcomeView(state, restart)] : []),
   );
 
@@ -103,7 +108,18 @@ function header(state: RunState): HTMLElement {
 }
 
 /** 层间的报酬：由你偏袒过的那一方给，选一张进 Deck，也可以不要。 */
-function favorView(state: RunState, dispatch: Dispatch): HTMLElement {
+/** 正在等这一方取舍。玩家只能等——但等的是一个有性格的决定。 */
+function fusingView(state: RunState): HTMLElement {
+  const request = state.agentRequests.find((r) => r.kind === 'fusion');
+  const who = state.agents.find((a) => a.factionId === request?.factionId)?.name ?? '对方';
+  const section = el('section', 'favor');
+  section.appendChild(
+    el('h2', undefined, request?.overload ? `${who}正在往里塞点什么…` : `${who}正在替你取舍…`),
+  );
+  return section;
+}
+
+function favorView(state: RunState, view: View, dispatch: Dispatch): HTMLElement {
   const offer = state.favor;
   const section = el('section', 'favor');
   if (!offer) return section;
@@ -117,22 +133,27 @@ function favorView(state: RunState, dispatch: Dispatch): HTMLElement {
     );
   }
 
+  const fusing = offer.tier === 'high' && offer.choices.length > 0;
+  if (fusing) {
+    section.appendChild(
+      el('p', 'favor-hint', '高阶人情给的不是一张牌，而是一次融合：选它给的一张，再选你自己的一张。'),
+    );
+  }
+
   const row = el('div', 'hand');
   for (const cardId of offer.choices) {
-    const definition = cardById(cardId);
+    const definition = cardById(state, cardId);
     if (!definition) continue;
-    const button = document.createElement('button');
-    button.className = `card card-${definition.type}`;
-    button.appendChild(el('span', 'card-cost', String(definition.cost)));
-    button.appendChild(el('span', 'card-name', definition.name));
-    button.appendChild(el('span', 'card-atoms', atomGlyphs(definition.atoms)));
-    button.appendChild(el('span', 'card-text', describeAtoms(definition.atoms)));
-    button.addEventListener('click', () =>
-      dispatch({ type: 'choose_favor', cardId, atMs: performance.now() }),
-    );
+    const button = cardButton(definition, view.fuseOfferedId === cardId);
+    button.addEventListener('click', () => {
+      if (fusing) view.onPickFuse(cardId, view.fuseDeckInstanceId);
+      else dispatch({ type: 'choose_favor', cardId, atMs: performance.now() });
+    });
     row.appendChild(button);
   }
   section.appendChild(row);
+
+  if (fusing) section.appendChild(fusePicker(state, view, dispatch));
 
   const skip = document.createElement('button');
   skip.className = 'primary';
@@ -375,13 +396,82 @@ function memoryView(state: RunState): HTMLElement {
     title.textContent = `${agent.name}　态度 ${values[agent.factionId] ?? 0}`;
     box.appendChild(title);
 
-    const lines = describeMemory(summary, (id) => cardById(id)?.name ?? id);
+    const lines = describeMemory(summary, (id) => cardById(state, id)?.name ?? id);
     for (const line of lines) {
       box.appendChild(el('p', undefined, line));
     }
     section.appendChild(box);
   }
   return section;
+}
+
+function cardButton(definition: CardDefinition, selected: boolean): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.className = `card card-${definition.type}${selected ? ' card-selected' : ''}`;
+  button.appendChild(el('span', 'card-cost', String(definition.cost)));
+  button.appendChild(el('span', 'card-name', definition.name));
+  button.appendChild(el('span', 'card-atoms', atomGlyphs(definition.atoms)));
+  button.appendChild(el('span', 'card-text', describeAtoms(definition.atoms)));
+  return button;
+}
+
+/** 从自己的 Deck 里挑一张来融，并决定要不要过载。 */
+function fusePicker(state: RunState, view: View, dispatch: Dispatch): HTMLElement {
+  const wrap = el('div', 'fuse');
+  wrap.appendChild(el('p', 'favor-hint', '你的牌库：'));
+
+  const row = el('div', 'hand');
+  for (const card of state.deck) {
+    const definition = cardById(state, card.definitionId);
+    if (!definition) continue;
+    const button = cardButton(definition, view.fuseDeckInstanceId === card.instanceId);
+    button.addEventListener('click', () => view.onPickFuse(view.fuseOfferedId, card.instanceId));
+    row.appendChild(button);
+  }
+  wrap.appendChild(row);
+
+  const offeredId = view.fuseOfferedId;
+  const offered = offeredId ? cardById(state, offeredId) : undefined;
+  const mine = state.deck.find((c) => c.instanceId === view.fuseDeckInstanceId);
+  const mineDefinition = mine ? cardById(state, mine.definitionId) : undefined;
+  if (!offeredId || !offered || !mine || !mineDefinition) return wrap;
+
+  const merged = [...mineDefinition.atoms, ...offered.atoms];
+  wrap.appendChild(
+    el('p', 'favor-hint', `合并后：${atomGlyphs(merged)}（${merged.length} 个 Atom）`),
+  );
+
+  const over = merged.length > MAX_ATOMS_PER_CARD;
+  const fuse = document.createElement('button');
+  fuse.className = 'primary';
+  fuse.textContent = over ? '让它替我取舍' : '融合';
+  fuse.addEventListener('click', () =>
+    dispatch({
+      type: 'fuse',
+      offeredCardId: offeredId,
+      deckInstanceId: mine.instanceId,
+      overload: false,
+      atMs: performance.now(),
+    }),
+  );
+  wrap.appendChild(fuse);
+
+  if (over) {
+    const overload = document.createElement('button');
+    overload.className = 'primary danger';
+    overload.textContent = '过载，赌一把';
+    overload.addEventListener('click', () =>
+      dispatch({
+        type: 'fuse',
+        offeredCardId: offeredId,
+        deckInstanceId: mine.instanceId,
+        overload: true,
+        atMs: performance.now(),
+      }),
+    );
+    wrap.appendChild(overload);
+  }
+  return wrap;
 }
 
 function journalView(state: RunState): HTMLElement {

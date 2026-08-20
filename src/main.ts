@@ -21,6 +21,8 @@ const inFlight = new Map<string, AbortController>();
 
 /** 界面状态：选中的攻击目标。它不影响规则，所以不进 RunState。 */
 let selectedTargetId: string | null = null;
+let fuseOfferedId: string | null = null;
+let fuseDeckInstanceId: string | null = null;
 
 function paint(): void {
   render(
@@ -30,6 +32,13 @@ function paint(): void {
       selectedTargetId,
       onSelectTarget: (id) => {
         selectedTargetId = id;
+        paint();
+      },
+      fuseOfferedId,
+      fuseDeckInstanceId,
+      onPickFuse: (offered, deckInstance) => {
+        fuseOfferedId = offered;
+        fuseDeckInstanceId = deckInstance;
         paint();
       },
     },

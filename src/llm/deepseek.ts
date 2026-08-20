@@ -39,6 +39,34 @@ function userPrompt(task: AgentTask): string {
 ${task.memory}`;
 
   switch (task.kind) {
+    case 'fusion': {
+      const [a, b] = task.sourceNames;
+      const list = (options: readonly { id: string; name: string; description: string; weight: number }[]): string =>
+        options.map((o) => `- ${o.id}（${o.name}，权重 ${o.weight}）：${o.description}`).join('\n');
+
+      if (task.overload) {
+        return `${persona}
+
+外来者把「${a}」和「${b}」压在一起，而且拒绝丢掉任何东西——他要过载。
+由你决定塞进哪一个禁忌 Atom，并给这张新牌起个名字。
+
+可选的禁忌 Atom：
+${list(task.forbidden)}
+
+用 JSON 回答：{"forbiddenAtomId": "<上面的 id>", "name": "<不超过 6 个字的牌名>"}`;
+      }
+
+      return `${persona}
+
+外来者要把「${a}」和「${b}」融成一张，但合起来的 Atom 超出了一张牌装得下的数量。
+由你决定丢掉哪一个，并给这张新牌起个名字。丢什么反映你看重什么。
+
+合并后的 Atom：
+${list(task.atoms)}
+
+用 JSON 回答：{"dropAtomId": "<上面的 id>", "name": "<不超过 6 个字的牌名>"}`;
+    }
+
     case 'intent': {
       const { combatant } = task;
       const options = task.options

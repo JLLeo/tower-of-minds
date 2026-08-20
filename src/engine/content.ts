@@ -1,4 +1,4 @@
-import { MAX_ATOMS_PER_CARD, cardTypeOf, costOf } from './atoms.js';
+import { MAX_ATOMS_PER_CARD, cardTypeOf, costOf, type AtomAxis } from './atoms.js';
 import {
   NO_STATUSES,
   type AgentState,
@@ -17,6 +17,11 @@ import {
 const EXECUTION_BY_TYPE: Partial<Record<CardType, ExecutionSpec>> = {
   shield: { windowMs: 900 },
 };
+
+/** 某个 Card Type 触发哪种判定。锻造出来的牌也要照这张表来。 */
+export function executionForType(type: CardType): ExecutionSpec | undefined {
+  return EXECUTION_BY_TYPE[type];
+}
 
 /**
  * Base Card 由 Atom 组成，cost / type / execution 全部推出来，没有一处手写。
@@ -207,6 +212,35 @@ export function baseCardsOf(factionId: string): readonly CardDefinition[] {
 
 /** 跨过这个阈值的 Faction 提供高阶 Favor。同向站队两次。 */
 export const HIGH_FAVOR_THRESHOLD = 2;
+
+/**
+ * 每个 Faction 融合时的性格：它舍不得哪一类 Atom，以及过载时会塞进哪个禁忌。
+ *
+ * 这不是给模型看的提示，而是**模型答不上来时引擎替它做的选择**。有了它，
+ * 「同样两张牌找不同派系融会得到不同的牌」在模型失灵时依然成立。
+ */
+export interface FusionTaste {
+  /** 优先丢掉的轴，按顺序。列在前面的先被舍弃。 */
+  readonly sheds: readonly AtomAxis[];
+  /** 过载时它会塞进来的那个 Forbidden Atom。 */
+  readonly forbidden: string;
+}
+
+const TASTES: Readonly<Record<string, FusionTaste>> = {
+  // 赤环要的是杀伤力，续航和资源先扔；过载时它选献祭。
+  'red-ring': { sheds: ['resource', 'defense', 'status', 'execution', 'faction'], forbidden: 'sacrifice' },
+  // 青蔓要的是活下去，纯输出先扔；过载时它选传染。
+  'green-vine': { sheds: ['damage', 'faction', 'status', 'execution', 'resource'], forbidden: 'contagion' },
+};
+
+const DEFAULT_TASTE: FusionTaste = {
+  sheds: ['faction', 'execution', 'status', 'resource', 'defense', 'damage'],
+  forbidden: 'wild',
+};
+
+export function fusionTasteOf(factionId: string): FusionTaste {
+  return TASTES[factionId] ?? DEFAULT_TASTE;
+}
 
 /** 一次 IntentRequest 允许等待多久。实测中位延迟约 1 秒，这里留足余量。 */
 export const INTENT_TIMEOUT_MS = 2500;

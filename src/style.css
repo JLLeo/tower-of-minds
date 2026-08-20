@@ -349,3 +349,27 @@ button.primary:disabled {
   margin: 6px 0 0;
   color: var(--dim);
 }
+
+.card-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.favor-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--dim);
+}
+
+.fuse {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+button.danger {
+  background: var(--hp);
+  color: #f6eeee;
+}

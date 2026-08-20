@@ -4,14 +4,17 @@ import {
   canPlay,
   definitionOf,
   currentSiding,
+  cardById,
   isPlayerActing,
   memoryOf,
   standings,
   startRun,
 } from './run.js';
-import { ATOMS, MAX_ATOMS_PER_CARD, effectsOf } from './atoms.js';
+import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
+import { preferredDrop, preferredForbidden } from './fusion.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
 import { PLAYER_TARGET } from './types.js';
+import type { FusionRequest, IntentRequest } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
 const SEED = 20260818;
@@ -42,7 +45,7 @@ function scriptInputs(start: RunState, maxSteps = 500): PlayerInput[] {
     // 场上有敌对派系就先打对方——这是实测到的真实模型行为，而不是回退那种
     // 「所有人都打玩家」的最坏情况。不这么做，测的就不是这个游戏。
     if (state.agentRequests.length > 0) {
-      for (const request of state.agentRequests) {
+      for (const request of intentRequestsOf(state)) {
         const me = state.encounter.combatants.find((c) => c.id === request.combatantId);
         const rival = state.encounter.combatants.find(
           (c) => c.hp > 0 && me !== undefined && c.factionId !== me.factionId,
@@ -128,13 +131,18 @@ const DEFEND: Readonly<Record<string, string>> = {
   'vine-scout': 'coil',
 };
 
+/** 只挑战斗提问。融合提问是另一种 kind，测试里另外处理。 */
+function intentRequestsOf(state: RunState): readonly IntentRequest[] {
+  return state.agentRequests.filter((r): r is IntentRequest => r.kind === 'intent');
+}
+
 /** 回答场上所有待答的提问。plan 决定每个 Combatant 答什么。 */
 function answerAll(
   state: RunState,
   plan: (combatantId: string) => unknown,
 ): RunState {
   let next = state;
-  for (const request of state.agentRequests) {
+  for (const request of intentRequestsOf(state)) {
     next = applyInput(next, {
       type: 'agent_response',
       requestId: request.id,
@@ -250,7 +258,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
 
   /** 只回答塔卫那一条提问，其余留着不动。 */
   function answer(state: RunState, payload: unknown): RunState {
-    const request = state.agentRequests.find((r) => r.combatantId === GUARD);
+    const request = intentRequestsOf(state).find((r) => r.combatantId === GUARD);
     return applyInput(state, { type: 'agent_response', requestId: request?.id ?? 'none', payload });
   }
 
@@ -263,7 +271,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
     const state = fresh();
 
     expect(state.agentRequests).toHaveLength(3); // 每个 Combatant 一条
-    expect(state.agentRequests.some((r) => r.combatantId === GUARD)).toBe(true);
+    expect(intentRequestsOf(state).some((r) => r.combatantId === GUARD)).toBe(true);
     expect(state.agentRequests[0]?.requestedAtMs).toBe(0);
     expect(state.encounter.combatants.every((c) => c.intent === null)).toBe(true);
   });
@@ -278,7 +286,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   it('合法响应会落成这一回合的 Intent', () => {
     const state = answer(fresh(), { actionId: 'brace', line: '先稳住阵脚。' });
 
-    expect(state.agentRequests.some((r) => r.combatantId === GUARD)).toBe(false);
+    expect(intentRequestsOf(state).some((r) => r.combatantId === GUARD)).toBe(false);
     expect(state.encounter.combatants[0]?.intent).toEqual({
       actionId: 'brace',
       targetId: null,
@@ -332,7 +340,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
     it('畸形响应：引擎替它选，Run 继续', () => {
       for (const payload of [null, 'not json', 42, {}, { line: '只有台词' }, { actionId: 7 }]) {
         const state = answer(fresh(), payload);
-        expect(state.agentRequests.some((r) => r.combatantId === GUARD)).toBe(false);
+        expect(intentRequestsOf(state).some((r) => r.combatantId === GUARD)).toBe(false);
         expect(state.encounter.combatants[0]?.intent?.source).toBe('fallback');
         expect(state.phase).toBe('in_encounter');
       }
@@ -872,7 +880,9 @@ describe('AgentRequest 管道（ADR-0010）', () => {
 
     expect(request?.kind).toBe('intent');
     expect(request?.id).toBeTruthy();
-    const combatant = state.encounter.combatants.find((c) => c.id === request?.combatantId);
+    const combatant = state.encounter.combatants.find(
+      (c) => c.id === (request?.kind === 'intent' ? request.combatantId : undefined),
+    );
     expect(request?.factionId).toBe(combatant?.factionId);
   });
 
@@ -911,7 +921,7 @@ describe('多方混战与站队', () => {
 
   it('每个 Combatant 各有一条提问，即使同属一个 Faction', () => {
     const state = fresh();
-    const asked = state.agentRequests.map((r) => r.combatantId).sort();
+    const asked = intentRequestsOf(state).map((r) => r.combatantId).sort();
 
     expect(asked).toEqual([ARCHER, SCOUT, GUARD].sort());
     // 同派的两个单位分别被问——合并成一次调用是 ADR-0004 明确拒绝的
@@ -1356,5 +1366,206 @@ describe('Memory 与 Standing', () => {
     const twice = clearFloor(applyInput(once, { type: 'choose_favor', cardId: null, atMs: 20_000 }));
     expect(standings(twice)['red-ring']).toBe(2);
     expect(twice.favor?.tier).toBe('high');
+  });
+});
+
+describe('Fusion 与 Mutation', () => {
+  const fresh = (options?: RunOptions): RunState =>
+    startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+
+  /** 牌库里放满重击（两个 Atom），这样两张合起来正好顶到上限。 */
+  const FUSION_DECK: RunOptions = {
+    startingDeck: Array.from({ length: 10 }, () => 'heavy'),
+    startedAtMs: 0,
+  };
+
+  /** 打光青蔓这一派，清掉当前这一层；赤环一直自守。 */
+  function clearFloor(state: RunState): RunState {
+    let next = state;
+    for (let turn = 0; turn < 40 && next.phase === 'in_encounter'; turn++) {
+      next = answerAll(next, (id) => ({
+        actionId: DEFEND[id.replace('-reinforcement', '')],
+        line: '',
+      }));
+      while (next.encounter.phase === 'player_turn') {
+        const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
+        const victim = next.encounter.combatants.find(
+          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        );
+        if (!card || !victim) break;
+        next = applyInput(next, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: victim.id,
+        });
+      }
+      if (next.phase !== 'in_encounter') break;
+      next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+    return next;
+  }
+
+  /** 连续两层把赤环留到最后，拿到第一次高阶 Favor。 */
+  function atHighFavor(): RunState {
+    let state = clearFloor(fresh(FUSION_DECK));
+    state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+    return clearFloor(state);
+  }
+
+  /** 挑它给的选项里 Atom 最多的那张——选项是随机的，这样融合的结果才可预期。 */
+  function richestOffer(state: RunState): string {
+    return [...state.favor!.choices].sort(
+      (a, b) => (cardById(state, b)?.atoms.length ?? 0) - (cardById(state, a)?.atoms.length ?? 0),
+    )[0]!;
+  }
+
+  function fuse(state: RunState, deckInstanceId: string, overload: boolean, atMs: number): RunState {
+    return applyInput(state, {
+      type: 'fuse',
+      offeredCardId: richestOffer(state),
+      deckInstanceId,
+      overload,
+      atMs,
+    });
+  }
+
+  /**
+   * 推到「融合必须有人取舍」的那一刻。
+   *
+   * Base Card 最多两个 Atom，所以**第一次融合永远顶不破上限**——它是引擎自己算完的。
+   * 要让 Agent 出场，得拿第一次锻出来的那张（4 个 Atom）再融一次。
+   */
+  function atOverflow(overload: boolean): { asking: RunState; request: FusionRequest } {
+    let state = atHighFavor();
+    const first = state.deck.find((c) => c.definitionId === 'heavy')!;
+    state = fuse(state, first.instanceId, false, 30_000);
+    expect(state.forged).toHaveLength(1);
+    // 重击两个 Atom 加它给的一到两个：顶到上限但没超，所以刚才没人需要取舍
+    expect(state.forged[0]!.atoms.length).toBeGreaterThanOrEqual(3);
+    expect(state.forged[0]!.atoms.length).toBeLessThanOrEqual(MAX_ATOMS_PER_CARD);
+
+    state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 31_000 });
+    state = clearFloor(state);
+    expect(state.favor?.tier).toBe('high');
+
+    const forgedInstance = state.deck.find((c) => c.definitionId === state.forged[0]!.id)!;
+    const asking = fuse(state, forgedInstance.instanceId, overload, 40_000);
+    const request = asking.agentRequests.find((r): r is FusionRequest => r.kind === 'fusion');
+    expect(request).toBeDefined();
+    return { asking, request: request! };
+  }
+
+  it('高阶 Favor 给的是一次融合机会', () => {
+    const state = atHighFavor();
+    expect(state.favor?.tier).toBe('high');
+    expect(state.favor?.choices.length).toBeGreaterThan(0);
+  });
+
+  it('合起来不超上限就当场锻好，不去打扰模型', () => {
+    const state = atHighFavor();
+    const mine = state.deck.find((c) => c.definitionId === 'heavy')!;
+    const offeredDefinition = cardById(state, richestOffer(state))!;
+
+    const fused = fuse(state, mine.instanceId, false, 30_000);
+
+    expect(fused.agentRequests.some((r) => r.kind === 'fusion')).toBe(false);
+    expect(fused.forged).toHaveLength(1);
+    const forged = fused.forged[0]!;
+
+    // 被融掉的那张走了，新的那张进来了，总数不变
+    expect(fused.deck.some((c) => c.instanceId === mine.instanceId)).toBe(false);
+    expect(fused.deck.some((c) => c.definitionId === forged.id)).toBe(true);
+    expect(fused.deck).toHaveLength(state.deck.length);
+
+    // Atom 合并、费用重算，玩家读得懂
+    expect(forged.atoms).toHaveLength(2 + offeredDefinition.atoms.length);
+    expect(forged.cost).toBe(costOf(forged.atoms));
+  });
+
+  it('超出上限才去问那一方该丢什么', () => {
+    const { asking, request } = atOverflow(false);
+
+    expect(asking.phase).toBe('fusing');
+    expect(request.overload).toBe(false);
+    expect(request.atoms.length).toBeGreaterThan(MAX_ATOMS_PER_CARD);
+  });
+
+  it('等取舍的时候别的输入都不生效', () => {
+    const { asking } = atOverflow(false);
+    expect(applyInput(asking, { type: 'choose_favor', cardId: null, atMs: 41_000 })).toBe(asking);
+    expect(applyInput(asking, { type: 'end_turn', atMs: 41_000 })).toBe(asking);
+  });
+
+  it('三条回退路径：超时、非法选择、畸形响应', () => {
+    const { asking, request } = atOverflow(false);
+
+    const outcomes = [
+      applyInput(asking, { type: 'tick', atMs: 40_000 + request.timeoutMs }),
+      applyInput(asking, {
+        type: 'agent_response',
+        requestId: request.id,
+        payload: { dropAtomId: 'sacrifice', name: '越界' }, // 不在合并结果里
+      }),
+      applyInput(asking, { type: 'agent_response', requestId: request.id, payload: null }),
+    ];
+
+    for (const outcome of outcomes) {
+      expect(outcome.phase).toBe('choosing_favor'); // Run 继续
+      expect(outcome.forged).toHaveLength(2);
+      const forged = outcome.forged[1]!;
+      expect(forged.atoms).toHaveLength(request.atoms.length - 1);
+      for (const atom of forged.atoms) expect(request.atoms).toContain(atom);
+    }
+  });
+
+  it('合法的取舍会被接受，名字也照用', () => {
+    const { asking, request } = atOverflow(false);
+    const drop = request.atoms[0]!;
+
+    const done = applyInput(asking, {
+      type: 'agent_response',
+      requestId: request.id,
+      payload: { dropAtomId: drop, name: '断链' },
+    });
+
+    const forged = done.forged[1]!;
+    expect(forged.name).toBe('断链');
+    expect(forged.atoms).toHaveLength(request.atoms.length - 1);
+  });
+
+  it('过载会塞进一个禁忌 Atom，一个都不丢，而且更便宜', () => {
+    const { asking, request } = atOverflow(true);
+    expect(request.overload).toBe(true);
+
+    const mutated = applyInput(asking, { type: 'tick', atMs: 40_000 + request.timeoutMs });
+    const forged = mutated.forged[1]!;
+
+    const forbidden = forged.atoms.filter((id) => ATOMS.find((a) => a.id === id)?.forbidden);
+    expect(forbidden).toHaveLength(1);
+    expect(forged.atoms).toHaveLength(request.atoms.length + 1);
+    expect(forged.cost).toBeLessThanOrEqual(costOf(request.atoms));
+  });
+
+  it('不同 Faction 的取舍与突变不一样', () => {
+    expect(preferredDrop('red-ring', ['strike', 'guard', 'draw'])).not.toBe(
+      preferredDrop('green-vine', ['strike', 'guard', 'draw']),
+    );
+    expect(preferredForbidden('red-ring')).not.toBe(preferredForbidden('green-vine'));
+  });
+
+  it('融合产物只属于这一局：Run 结束就没了（ADR-0009）', () => {
+    let state = atHighFavor();
+    const mine = state.deck.find((c) => c.definitionId === 'heavy')!;
+    state = fuse(state, mine.instanceId, false, 30_000);
+    expect(state.forged.length).toBeGreaterThan(0);
+
+    for (let floor = 2; floor < 6 && state.phase !== 'ended'; floor++) {
+      state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 40_000 * floor });
+      state = clearFloor(state);
+    }
+
+    expect(state.phase).toBe('ended');
+    expect(state.forged).toHaveLength(0);
   });
 });
