@@ -5,12 +5,12 @@ import {
   definitionOf,
   currentSiding,
   isPlayerActing,
+  memoryOf,
   standings,
   startRun,
 } from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, effectsOf } from './atoms.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
-import { memoriesOf } from './memory.js';
 import { PLAYER_TARGET } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
@@ -1234,7 +1234,7 @@ describe('Memory 与 Standing', () => {
     });
 
     for (const factionId of ['red-ring', 'green-vine']) {
-      const seen = memoriesOf(state, factionId).filter((e) => e.kind === 'card_played');
+      const seen = memoryOf(state, factionId).filter((e) => e.kind === 'card_played');
       expect(seen).toHaveLength(1);
       expect(seen[0]).toMatchObject({ kind: 'card_played', cardId: 'strike', floor: 1 });
     }
@@ -1259,7 +1259,7 @@ describe('Memory 与 Standing', () => {
     }
 
     const seen = new Set(
-      memoriesOf(state, 'red-ring')
+      memoryOf(state, 'red-ring')
         .filter((e) => e.kind === 'card_played')
         .map((e) => (e.kind === 'card_played' ? e.cardId : '')),
     );
@@ -1271,15 +1271,49 @@ describe('Memory 与 Standing', () => {
     expect(seen.has('heavy')).toBe(false);
   });
 
+  it('盾牌类 Card 也会被记住——它会挂起判定，但不该因此从记忆里消失', () => {
+    let state = fresh(deckOf('guard'));
+    const card = state.encounter.player.hand[0]!;
+    state = applyInput(state, { type: 'play_card', instanceId: card.instanceId, atMs: 0 });
+    expect(state.encounter.phase).toBe('awaiting_execution'); // 确实挂起了
+
+    const seen = memoryOf(state, 'red-ring').filter((e) => e.kind === 'card_played');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ cardId: 'guard' });
+  });
+
+  it('Run 结束时 Memory 清空（ADR-0003）', () => {
+    let state = clearedOnce();
+    expect(memoryOf(state, 'red-ring').length).toBeGreaterThan(0);
+
+    // 一路走到最后一层并清掉它
+    for (let floor = 1; floor < 5 && state.phase !== 'ended'; floor++) {
+      state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 * floor });
+      state = clearFloor(state);
+    }
+
+    expect(state.phase).toBe('ended');
+    expect(state.outcome).toBe('victory');
+    expect(Object.keys(state.memories)).toHaveLength(0);
+  });
+
+  it('换着打就不会招来增援，一直挑同一方才会', () => {
+    // 一直挑青蔓：第三层它就带人来了
+    let picky = clearedOnce();
+    picky = clearFloor(applyInput(picky, { type: 'choose_favor', cardId: null, atMs: 20_000 }));
+    const third = applyInput(picky, { type: 'choose_favor', cardId: null, atMs: 40_000 });
+    expect(third.encounter.combatants.length).toBeGreaterThan(3);
+  });
+
   it('Standing 由 Memory 推出：留它活着加分，伤它扣分', () => {
     const state = clearedOnce();
 
     // 赤环被留下来了
-    expect(memoriesOf(state, 'red-ring').some((e) => e.kind === 'sided')).toBe(true);
+    expect(memoryOf(state, 'red-ring').some((e) => e.kind === 'sided')).toBe(true);
     expect(standings(state)['red-ring']).toBe(1);
 
     // 青蔓被打光了
-    const harmed = memoriesOf(state, 'green-vine').filter((e) => e.kind === 'harmed');
+    const harmed = memoryOf(state, 'green-vine').filter((e) => e.kind === 'harmed');
     expect(harmed).toHaveLength(1);
     expect(standings(state)['green-vine']).toBeLessThan(0);
   });
@@ -1296,7 +1330,7 @@ describe('Memory 与 Standing', () => {
       targetId: 'vine-scout',
     });
 
-    expect(memoriesOf(state, 'green-vine').some((e) => e.kind === 'parley')).toBe(true);
+    expect(memoryOf(state, 'green-vine').some((e) => e.kind === 'parley')).toBe(true);
     expect(standings(state)['green-vine']).toBe(before + 1);
   });
 

@@ -191,7 +191,10 @@ export function combatantsForFloor(
 
   // 被得罪的 Faction 多带一个人。这是「你得罪了它」看得见的后果。
   for (const factionId of reinforced) {
-    const template = ROSTER.find((t) => t.factionId === factionId);
+    // 临时凑来的人手：挑这一派里最单薄的那个模板，再打个折。
+    const template = ROSTER.filter((t) => t.factionId === factionId).sort(
+      (a, b) => a.hp - b.hp,
+    )[0];
     if (template) field.push(build(template, '-reinforcement'));
   }
   return field;

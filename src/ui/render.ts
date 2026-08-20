@@ -13,7 +13,7 @@ import {
 } from '../engine/run.js';
 import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
 import { NORMAL_FLOORS } from '../engine/content.js';
-import { memoriesOf } from '../engine/memory.js';
+import { describeMemory, summarizeMemory } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
@@ -366,46 +366,22 @@ function memoryView(state: RunState): HTMLElement {
   const values = standings(state);
 
   for (const agent of state.agents) {
-    const entries = memoriesOf(state, agent.factionId);
-    if (entries.length === 0) continue;
+    const summary = summarizeMemory(state, agent.factionId);
+    if (summary.sided + summary.parley + summary.harm + summary.cards.length === 0) continue;
 
     const box = document.createElement('details');
     box.className = 'memory';
-    const summary = document.createElement('summary');
-    summary.textContent = `${agent.name}　态度 ${values[agent.factionId] ?? 0}`;
-    box.appendChild(summary);
+    const title = document.createElement('summary');
+    title.textContent = `${agent.name}　态度 ${values[agent.factionId] ?? 0}`;
+    box.appendChild(title);
 
-    for (const line of memorySummary(state, agent.factionId)) {
+    const lines = describeMemory(summary, (id) => cardById(id)?.name ?? id);
+    for (const line of lines) {
       box.appendChild(el('p', undefined, line));
     }
     section.appendChild(box);
   }
   return section;
-}
-
-/** 把条目摊成人话。和喂给模型的是同一批事实，只是排版不同。 */
-function memorySummary(state: RunState, factionId: string): readonly string[] {
-  const cards = new Set<string>();
-  let harm = 0;
-  let sided = 0;
-  let parley = 0;
-
-  for (const entry of memoriesOf(state, factionId)) {
-    if (entry.kind === 'card_played') cards.add(entry.cardId);
-    else if (entry.kind === 'harmed') harm += entry.amount;
-    else if (entry.kind === 'sided') sided += 1;
-    else parley += 1;
-  }
-
-  const lines: string[] = [];
-  if (sided > 0) lines.push(`你有 ${sided} 次把它留到了最后。`);
-  if (parley > 0) lines.push(`你对它示好过 ${parley} 次。`);
-  if (harm > 0) lines.push(`你一共伤了它 ${harm} 点。`);
-  if (cards.size > 0) {
-    const names = [...cards].map((id) => cardById(id)?.name ?? id).join('、');
-    lines.push(`它见过你打出：${names}。`);
-  }
-  return lines;
 }
 
 function journalView(state: RunState): HTMLElement {

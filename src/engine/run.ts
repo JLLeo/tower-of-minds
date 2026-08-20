@@ -2,10 +2,11 @@ import { createRng, nextInt, shuffle, type Rng } from './rng.js';
 import { effectsOf } from './atoms.js';
 import {
   allStandings,
+  memoriesOf,
   offendedFactions,
   remember,
   rememberCardPlayed,
-  standingOf,
+  sidedWith,
 } from './memory.js';
 import {
   dropRequests,
@@ -40,6 +41,7 @@ import type {
   ExecutionSpec,
   FavorOffer,
   Generation,
+  MemoryEntry,
   PlayerInput,
   PlayerState,
   RunOptions,
@@ -257,6 +259,11 @@ export function livingCombatants(state: RunState): readonly CombatantState[] {
   return state.encounter.combatants.filter((c) => c.hp > 0);
 }
 
+/** 某个 Faction 记得的事。界面与测试都从这里读。 */
+export function memoryOf(state: RunState, factionId: string): readonly MemoryEntry[] {
+  return memoriesOf(state, factionId);
+}
+
 /** 每个 Faction 对玩家的态度，由 Memory 推出。界面与 prompt 都读它。 */
 export function standings(state: RunState): Readonly<Record<string, number>> {
   return allStandings(state);
@@ -329,15 +336,20 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
   const effects = effectsOf(definition.atoms, target);
   const journal = [...state.journal, `你打出「${definition.name}」。`];
 
+  // 在场的人当场就看见了这张牌。必须记在挂起判定**之前**——否则盾牌类
+  // 永远走不到记录那一步，而那正是 #14 要用的情报。
+  const seen = rememberCardPlayed(
+    { ...state, journal, encounter: { ...encounter, player } },
+    definition.id,
+  );
+
   // ADR-0002：需要实时输入的 Card 在这里把结算挂起，剩下的效果等输入回来再执行。
   // 每回合只挂起一次——同回合的后续 Card 直接结算。
   if (definition.execution && !encounter.executionUsedThisTurn) {
     return {
-      ...state,
-      journal,
+      ...seen,
       encounter: {
-        ...encounter,
-        player,
+        ...seen.encounter,
         phase: 'awaiting_execution',
         executionUsedThisTurn: true,
         lastGrade: null,
@@ -351,7 +363,6 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
     };
   }
 
-  const seen = rememberCardPlayed({ ...state, journal, encounter: { ...encounter, player } }, definition.id);
   return checkOutcome(discard(applyEffects(seen, effects), card));
 }
 
@@ -426,7 +437,7 @@ function applyEffect(state: RunState, effect: Effect): RunState {
       return recall(state, effect.amount);
 
     case 'parley': {
-      const target = encounter.combatants.find((c) => c.id === effect.targetId);
+      const target = encounter.combatants.find((c) => c.id === effect.targetId && c.hp > 0);
       if (!target) return state;
       const who = state.agents.find((a) => a.factionId === target.factionId)?.name ?? '对方';
       return remember(
@@ -758,6 +769,7 @@ function checkOutcome(state: RunState): RunState {
       ...state,
       phase: 'ended',
       outcome: 'defeat',
+      memories: {},
       agentRequests: [],
       encounter: { ...encounter, phase: 'ended', pending: null },
       journal: [...state.journal, '你倒在了塔里。'],
@@ -798,6 +810,7 @@ function clearFloor(state: RunState): RunState {
       ...state,
       phase: 'ended',
       outcome: 'victory',
+      memories: {},
       journal: [...state.journal, '你走到了塔的尽头。'],
     };
   }
@@ -847,7 +860,8 @@ function buildFavor(state: RunState, factionId: string | null): FavorOffer {
 
   const pool = baseCardsOf(factionId).map((card) => card.id);
   const [, shuffled] = shuffle(state.rng, pool);
-  const tier = standingOf(state, factionId) >= HIGH_FAVOR_THRESHOLD ? 'high' : 'basic';
+  // 高阶只认「你把它留到最后」的次数：Parley 改变态度，但换不来融合的资格。
+  const tier = sidedWith(state, factionId) >= HIGH_FAVOR_THRESHOLD ? 'high' : 'basic';
 
   // 高阶 Favor 本该给的是一次 Fusion 机会而不是一张牌——那是 #13。
   return { factionId, tier, choices: shuffled.slice(0, count) };
