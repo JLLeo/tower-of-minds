@@ -9,9 +9,17 @@ import {
 } from '../engine/run.js';
 import { pendingRequestFor } from '../engine/agents.js';
 import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
+import { livingCombatants } from '../engine/run.js';
+import { PLAYER_TARGET } from '../engine/types.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
 export type Dispatch = (input: PlayerInput) => void;
+
+/** 纯粹的界面状态：它不影响规则，所以不进 RunState。 */
+export interface View {
+  readonly selectedTargetId: string | null;
+  readonly onSelectTarget: (combatantId: string) => void;
+}
 
 /** 上一次渲染留下的时机条动画与按键监听，下一次渲染前必须先拆掉。 */
 let stopTimingBar: (() => void) | null = null;
@@ -25,6 +33,7 @@ let stopTimingBar: (() => void) | null = null;
 export function render(
   root: HTMLElement,
   state: RunState,
+  view: View,
   dispatch: Dispatch,
   restart: () => void,
 ): void {
@@ -33,9 +42,9 @@ export function render(
 
   root.replaceChildren(
     header(state),
-    combatantsView(state),
+    combatantsView(state, view),
     playerView(state),
-    handView(state, dispatch),
+    handView(state, view, dispatch),
     controls(state, dispatch),
     journalView(state),
     ...(state.phase === 'ended' ? [outcomeView(state, restart)] : []),
@@ -77,13 +86,24 @@ function meter(label: string, value: number, max: number, className: string): HT
   return wrap;
 }
 
-function combatantsView(state: RunState): HTMLElement {
+function combatantsView(state: RunState, view: View): HTMLElement {
   const section = el('section', 'combatants');
+  const target = effectiveTarget(state, view);
 
   for (const combatant of state.encounter.combatants) {
     const down = combatant.hp <= 0;
-    const card = el('div', down ? 'combatant combatant-down' : 'combatant');
-    card.appendChild(el('h2', undefined, combatant.name));
+    const selected = !down && combatant.id === target;
+    const classes = ['combatant'];
+    if (down) classes.push('combatant-down');
+    if (selected) classes.push('combatant-target');
+    const card = el('div', classes.join(' '));
+    if (!down) {
+      card.addEventListener('click', () => view.onSelectTarget(combatant.id));
+    }
+
+    const heading = el('h2', undefined, combatant.name);
+    heading.appendChild(el('span', 'combatant-faction', factionNameOf(state, combatant.factionId)));
+    card.appendChild(heading);
     card.appendChild(meter('HP', combatant.hp, combatant.maxHp, 'fill-hp'));
     if (combatant.block > 0) card.appendChild(el('div', 'block-badge', `格挡 ${combatant.block}`));
 
@@ -93,7 +113,14 @@ function combatantsView(state: RunState): HTMLElement {
       // Intent：它下一回合打算做什么。动作由引擎从合法集里确认过，台词只是叙事。
       const action = intendedAction(combatant);
       if (action) {
-        card.appendChild(el('div', 'combatant-next', `意图：${action.description}`));
+        const aim = combatant.intent?.targetId;
+        const at =
+          aim && aim !== PLAYER_TARGET
+            ? `攻向${state.encounter.combatants.find((c) => c.id === aim)?.name ?? aim}：`
+            : aim === PLAYER_TARGET
+              ? '攻向你：'
+              : '';
+        card.appendChild(el('div', 'combatant-next', `意图：${at}${action.description}`));
         const line = combatant.intent?.line;
         if (line) card.appendChild(el('div', 'combatant-line', `「${line}」`));
       } else if (
@@ -128,8 +155,21 @@ function describe(definition: CardDefinition): string {
   return parts.filter((part) => part.length > 0).join('；');
 }
 
-function handView(state: RunState, dispatch: Dispatch): HTMLElement {
+/** 玩家这一刻打出去会打到谁：选中的那个，选中的死了就顺延到第一个还活着的。 */
+function effectiveTarget(state: RunState, view: View): string | undefined {
+  const chosen = state.encounter.combatants.find(
+    (c) => c.id === view.selectedTargetId && c.hp > 0,
+  );
+  return (chosen ?? livingCombatants(state)[0])?.id;
+}
+
+function factionNameOf(state: RunState, factionId: string): string {
+  return state.agents.find((a) => a.factionId === factionId)?.name ?? factionId;
+}
+
+function handView(state: RunState, view: View, dispatch: Dispatch): HTMLElement {
   const section = el('section', 'hand');
+  const target = effectiveTarget(state, view);
 
   for (const card of state.encounter.player.hand) {
     const definition = definitionOf(state, card.instanceId);
@@ -143,7 +183,12 @@ function handView(state: RunState, dispatch: Dispatch): HTMLElement {
     button.appendChild(el('span', 'card-atoms', atomGlyphs(definition.atoms)));
     button.appendChild(el('span', 'card-text', describe(definition)));
     button.addEventListener('click', () =>
-      dispatch({ type: 'play_card', instanceId: card.instanceId, atMs: performance.now() }),
+      dispatch({
+        type: 'play_card',
+        instanceId: card.instanceId,
+        atMs: performance.now(),
+        ...(target ? { targetId: target } : {}),
+      }),
     );
     section.appendChild(button);
   }

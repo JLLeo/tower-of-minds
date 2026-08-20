@@ -1,4 +1,13 @@
+import { legalTargetsFor } from '../engine/agents.js';
+import { PLAYER_TARGET } from '../engine/types.js';
 import type { AgentRequest, AgentState, CombatantState, RunState } from '../engine/types.js';
+
+/** 一个合法动作，连同它这一刻能打的目标。合法集由引擎算，模型只能从中选。 */
+export interface ActionOption {
+  readonly actionId: string;
+  readonly description: string;
+  readonly targets: readonly { readonly id: string; readonly name: string }[];
+}
 
 /**
  * 一次提问需要的全部上下文，按 kind 分。Fusion（#13）与层间构筑（#14）各自加一个
@@ -8,6 +17,9 @@ export type AgentTask = {
   readonly kind: 'intent';
   readonly agent: AgentState;
   readonly combatant: CombatantState;
+  readonly options: readonly ActionOption[];
+  readonly allies: readonly string[];
+  readonly rivals: readonly string[];
   readonly turn: number;
   readonly playerHp: number;
   readonly playerMaxHp: number;
@@ -34,10 +46,26 @@ export function taskFor(state: RunState, request: AgentRequest): AgentTask | und
     case 'intent': {
       const combatant = state.encounter.combatants.find((c) => c.id === request.combatantId);
       if (!combatant) return undefined;
+      const nameOf = (id: string): string =>
+        id === PLAYER_TARGET
+          ? '外来者'
+          : (state.encounter.combatants.find((c) => c.id === id)?.name ?? id);
+
       return {
         kind: 'intent',
         agent,
         combatant,
+        options: combatant.actions.map((action) => ({
+          actionId: action.id,
+          description: action.description,
+          targets: legalTargetsFor(state, combatant, action).map((id) => ({ id, name: nameOf(id) })),
+        })),
+        allies: state.encounter.combatants
+          .filter((c) => c.hp > 0 && c.factionId === combatant.factionId && c.id !== combatant.id)
+          .map((c) => `${c.name}（${c.hp}/${c.maxHp}）`),
+        rivals: state.encounter.combatants
+          .filter((c) => c.hp > 0 && c.factionId !== combatant.factionId)
+          .map((c) => `${c.name}（${c.hp}/${c.maxHp}）`),
         turn: state.encounter.turn,
         playerHp: state.encounter.player.hp,
         playerMaxHp: state.encounter.player.maxHp,

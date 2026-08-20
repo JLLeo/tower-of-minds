@@ -42,32 +42,46 @@ let rejected = 0;
 
 for (let i = 1; i <= rounds; i++) {
   const state = startRun(BUILT_IN_GENERATION, i, { startedAtMs: 0 });
-  const request = state.agentRequests[0];
-  const task = request ? taskFor(state, request) : undefined;
+  console.log(`— 第 ${i} 局 —`);
 
-  if (!request || !task) {
-    console.log(`#${i}  引擎没有挂出提问，跳过`);
-    continue;
-  }
-
-  const startedAt = performance.now();
-  try {
+  // 场上每个 Combatant 一条提问，并行发出（ADR-0004：不合并）。
+  const asks = state.agentRequests.map(async (request) => {
+    const task = taskFor(state, request);
+    if (!task) return null;
+    const startedAt = performance.now();
     const payload = await provider.ask(task, new AbortController().signal);
-    const elapsedMs = performance.now() - startedAt;
-    timings.push(elapsedMs);
+    return { request, payload, elapsedMs: performance.now() - startedAt };
+  });
 
-    // 合法性由引擎判，不在这里另写一份规则。
-    const next = applyInput(state, { type: 'agent_response', requestId: request.id, payload });
-    const intent = next.encounter.combatants.find((c) => c.id === request.combatantId)?.intent;
+  const results = await Promise.all(asks);
+
+  let next = state;
+  for (const result of results) {
+    if (!result) continue;
+    timings.push(result.elapsedMs);
+    next = applyInput(next, {
+      type: 'agent_response',
+      requestId: result.request.id,
+      payload: result.payload,
+    });
+
+    const combatant = next.encounter.combatants.find((c) => c.id === result.request.combatantId);
+    const intent = combatant?.intent;
     const accepted = intent?.source === 'agent';
     if (!accepted) rejected++;
 
+    const aim =
+      intent?.targetId === null
+        ? '自守'
+        : intent?.targetId === 'player'
+          ? '打玩家'
+          : `打${next.encounter.combatants.find((c) => c.id === intent?.targetId)?.name ?? '?'}`;
+
     console.log(
-      `#${i}  ${Math.round(elapsedMs)}ms  ${accepted ? '引擎接受' : '引擎拒绝并回退'}  ` +
-        `actionId=${intent?.actionId ?? '—'}  「${intent?.line || '—'}」`,
+      `  ${combatant?.name}  ${Math.round(result.elapsedMs)}ms  ` +
+        `${accepted ? '接受' : '拒绝并回退'}  ${intent?.actionId ?? '—'} ${aim}  ` +
+        `「${intent?.line || '—'}」`,
     );
-  } catch (error) {
-    console.log(`#${i}  调用失败 :: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

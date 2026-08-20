@@ -45,9 +45,14 @@ export interface CombatantAction {
   readonly id: string;
   readonly kind: 'attack' | 'defend';
   readonly amount: number;
+  /** 打谁：敌对目标，还是自己。合法目标由引擎按这个算出来。 */
+  readonly targeting: 'enemy' | 'self';
   /** 给模型和玩家看的说明。引擎结算只认 kind 和 amount，不解析这段文字。 */
   readonly description: string;
 }
+
+/** 玩家在目标系统里的身份。他不是 Combatant，但可以被打。 */
+export const PLAYER_TARGET = 'player';
 
 /**
  * Agent 为下一回合选定的行动。它永远是引擎给出的合法动作集里的一个——
@@ -55,6 +60,8 @@ export interface CombatantAction {
  */
 export interface Intent {
   readonly actionId: string;
+  /** 打谁。自我防御类动作为 null。 */
+  readonly targetId: string | null;
   readonly line: string;
   readonly source: 'agent' | 'fallback';
 }
@@ -206,6 +213,11 @@ export interface EncounterState {
   readonly player: PlayerState;
   readonly combatants: readonly CombatantState[];
   readonly pending: PendingExecution | null;
+  /**
+   * 玩家这一场对每个 Faction 造成的伤害。站队就记在这里：你打谁打得最多，
+   * 就是站在谁的对面。Standing 与跨层的累积在 #8 落地。
+   */
+  readonly damageDealtTo: Readonly<Record<string, number>>;
   /** ADR-0002：每回合最多触发一次 Execution Check。 */
   readonly executionUsedThisTurn: boolean;
   /** 本回合最近一次判定的结果，供界面当场反馈。新回合清空。 */

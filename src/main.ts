@@ -19,8 +19,23 @@ let state: RunState = startRun(BUILT_IN_GENERATION, Date.now(), {
 /** 正在飞的提问，按 requestId 索引——同时可能有好几个 Agent 在被问。 */
 const inFlight = new Map<string, AbortController>();
 
+/** 界面状态：选中的攻击目标。它不影响规则，所以不进 RunState。 */
+let selectedTargetId: string | null = null;
+
 function paint(): void {
-  render(root!, state, dispatch, restart);
+  render(
+    root!,
+    state,
+    {
+      selectedTargetId,
+      onSelectTarget: (id) => {
+        selectedTargetId = id;
+        paint();
+      },
+    },
+    dispatch,
+    restart,
+  );
 }
 
 function dispatch(input: PlayerInput): void {

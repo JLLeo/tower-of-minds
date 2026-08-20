@@ -7,6 +7,7 @@ import {
   openIntentRequests,
   receiveResponse,
 } from './agents.js';
+import { PLAYER_TARGET } from './types.js';
 import {
   CARD_POOL,
   HAND_SIZE,
@@ -73,6 +74,7 @@ export function startRun(
     player,
     combatants: floorOneCombatants(),
     pending: null,
+    damageDealtTo: {},
     executionUsedThisTurn: false,
     lastGrade: null,
   };
@@ -186,6 +188,24 @@ export function canPlay(state: RunState, instanceId: string): boolean {
 
 export function livingCombatants(state: RunState): readonly CombatantState[] {
   return state.encounter.combatants.filter((c) => c.hp > 0);
+}
+
+/**
+ * 你这一场偏袒了谁：在场的 Faction 里，你打得最少的那个。打得一样多就没有偏袒。
+ * #7 的 Favor 与 #8 的 Standing 都从这里读。
+ */
+export function favoredFaction(state: RunState): string | null {
+  const present = new Set(state.encounter.combatants.map((c) => c.factionId));
+  if (present.size < 2) return null;
+
+  const scored = [...present]
+    .map((factionId) => ({ factionId, damage: state.encounter.damageDealtTo[factionId] ?? 0 }))
+    .sort((a, b) => a.damage - b.damage);
+
+  const best = scored[0];
+  const runnerUp = scored[1];
+  if (!best || !runnerUp || best.damage === runnerUp.damage) return null;
+  return best.factionId;
 }
 
 /** 某个 Agent 这一回合打算做的事，供界面显示。还没定下来时返回 undefined。 */
@@ -369,7 +389,11 @@ function dealDamage(
   hits: number,
   ignoreBlock: boolean,
 ): RunState {
-  return withCombatant(state, targetId, (combatant) => {
+  const target = state.encounter.combatants.find((c) => c.id === targetId);
+  if (!target) return state;
+
+  const before = target.hp;
+  const next = withCombatant(state, targetId, (combatant) => {
     let current = combatant;
     for (let i = 0; i < hits; i++) {
       if (current.hp <= 0) break;
@@ -377,6 +401,22 @@ function dealDamage(
     }
     return current;
   });
+
+  const after = next.encounter.combatants.find((c) => c.id === targetId);
+  const dealt = before - (after?.hp ?? before);
+  if (dealt <= 0) return next;
+
+  // 站队就记在这里：玩家打谁打得多，就是站在谁的对面。
+  return {
+    ...next,
+    encounter: {
+      ...next.encounter,
+      damageDealtTo: {
+        ...next.encounter.damageDealtTo,
+        [target.factionId]: (next.encounter.damageDealtTo[target.factionId] ?? 0) + dealt,
+      },
+    },
+  };
 }
 
 /** 格挡先吃伤害，剩下的进 HP。易伤在第一段伤害上触发并消耗。 */
@@ -467,28 +507,44 @@ function endTurn(state: RunState, atMs: number): RunState {
       combatants[i] = acted;
       continue;
     }
-    if (action.kind === 'attack') {
-      // 虚弱先砍一半，坚忍再减一截，最后才轮到格挡。
-      const raw = combatant.statuses.weakened ? Math.round(action.amount * 0.5) : action.amount;
+
+    if (action.kind === 'defend') {
+      combatants[i] = { ...acted, block: action.amount };
+      journal.push(`${combatant.name}架起 ${action.amount} 点格挡。`);
+      continue;
+    }
+
+    // 虚弱先砍一半，这一刀无论打谁都一样。
+    const raw = combatant.statuses.weakened ? Math.round(action.amount * 0.5) : action.amount;
+    let after: CombatantState = { ...acted, statuses: { ...acted.statuses, weakened: false } };
+
+    if (intent.targetId === PLAYER_TARGET) {
       const reduced = Math.max(0, raw - player.statuses.endure);
       const { block, dealt } = absorb(player.block, reduced);
       player = { ...player, block, hp: Math.max(0, player.hp - dealt) };
-
-      let after: CombatantState = {
-        ...acted,
-        statuses: { ...acted.statuses, weakened: false },
-      };
-      journal.push(`${combatant.name}进攻，造成 ${dealt} 点伤害。`);
+      journal.push(`${combatant.name}攻向你，造成 ${dealt} 点伤害。`);
 
       if (player.statuses.thorns > 0) {
         after = takeHit(after, player.statuses.thorns, false, false);
         journal.push(`荆棘反弹 ${player.statuses.thorns} 点伤害。`);
       }
       combatants[i] = after;
-    } else {
-      combatants[i] = { ...acted, block: action.amount };
-      journal.push(`${combatant.name}架起 ${action.amount} 点格挡。`);
+      continue;
     }
+
+    // 打的是别的 Faction 的人——这正是多方混战里玩家该看见的东西。
+    const targetIndex = combatants.findIndex((c) => c?.id === intent.targetId);
+    const target = targetIndex >= 0 ? combatants[targetIndex] : undefined;
+    combatants[i] = after;
+    if (!target || target.hp <= 0) {
+      journal.push(`${combatant.name}扑了个空。`);
+      continue;
+    }
+    const before = target.hp;
+    combatants[targetIndex] = takeHit(target, raw, false);
+    journal.push(
+      `${combatant.name}攻向${target.name}，造成 ${before - (combatants[targetIndex]?.hp ?? before)} 点伤害。`,
+    );
   }
 
   // 回合末结算灼烧。
@@ -580,14 +636,22 @@ function checkOutcome(state: RunState): RunState {
     };
   }
 
-  if (encounter.combatants.every((combatant) => combatant.hp <= 0)) {
+  // 玩家活着离开这一层：场上不再有两个敌对 Faction 同时存在，剩下的那一方放你过去。
+  // 不需要清场——你可以刻意留某一方活着。
+  const living = encounter.combatants.filter((combatant) => combatant.hp > 0);
+  const factions = new Set(living.map((combatant) => combatant.factionId));
+  if (factions.size <= 1) {
+    const survivor = living[0];
     return {
       ...state,
       phase: 'ended',
       outcome: 'victory',
       agentRequests: [],
       encounter: { ...encounter, phase: 'ended', pending: null },
-      journal: [...state.journal, '这一层清空了。'],
+      journal: [
+        ...state.journal,
+        survivor ? `场上只剩下${survivor.name}这一方，它放你过去。` : '这一层清空了。',
+      ],
     };
   }
 

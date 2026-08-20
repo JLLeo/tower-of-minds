@@ -14,7 +14,10 @@ const CARD_POOL_LINES = CARD_POOL.map(
 const SYSTEM_PROMPT = `你在一款卡牌 roguelike 里扮演塔中的一个角色。
 每回合你会收到一份合法动作清单，你只能从中挑一个。你不能发明新动作、新数值或新效果——
 清单之外的任何东西都会被引擎丢弃。
-用 JSON 回答，形如 {"actionId": "<清单里的 id>", "line": "<一句不超过 20 字的台词>"}。
+用 JSON 回答，形如 {"actionId": "<清单里的 id>", "targetId": "<该动作允许的目标 id>", "line": "<一句不超过 20 字的台词>"}。
+targetId 必须原样抄写清单里给出的 id（形如 player、vine-scout），**不要写名字**，写错会被丢弃。
+自我防御类动作不需要 targetId。塔里不止一个派系，你可以打外来者，也可以打敌对派系——
+清单里列出的就是你这一刻能打的全部目标。
 台词要反映你的动机，不要复述动作本身。
 
 所有牌都由固定的 Atom 组成，没有别的东西：
@@ -34,18 +37,28 @@ function userPrompt(task: AgentTask): string {
   switch (task.kind) {
     case 'intent': {
       const { combatant } = task;
-      const actions = combatant.actions
-        .map((action) => `- ${action.id}：${action.description}`)
+      const options = task.options
+        .map((option) => {
+          const targets = option.targets.length
+            ? option.targets.map((t) => `targetId=${t.id}（${t.name}）`).join('、')
+            : '无需目标';
+          return `- ${option.actionId}：${option.description}｜可选目标：${targets}`;
+        })
         .join('\n');
+
+      const allies = task.allies.length ? task.allies.join('、') : '无';
+      const rivals = task.rivals.length ? task.rivals.join('、') : '无';
 
       return `${persona}
 
 现在由你决定${combatant.name}这一回合做什么。
 第 ${task.turn} 回合。它 HP ${combatant.hp}/${combatant.maxHp}，格挡 ${combatant.block}。
-对手 HP ${task.playerHp}/${task.playerMaxHp}，格挡 ${task.playerBlock}，手里还有 ${task.handSize} 张牌。
+外来者 HP ${task.playerHp}/${task.playerMaxHp}，格挡 ${task.playerBlock}，手里还有 ${task.handSize} 张牌。
+你的同伴：${allies}
+敌对派系：${rivals}
 
-合法动作：
-${actions}`;
+合法动作与目标：
+${options}`;
     }
   }
 }

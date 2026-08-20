@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { applyInput, canPlay, definitionOf, isPlayerActing, startRun } from './run.js';
+import {
+  applyInput,
+  canPlay,
+  definitionOf,
+  favoredFaction,
+  isPlayerActing,
+  startRun,
+} from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, effectsOf } from './atoms.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
+import { PLAYER_TARGET } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
 const SEED = 20260818;
@@ -63,6 +71,39 @@ function playAndResolve(state: RunState, definitionId: string): RunState {
   return applyInput(suspended, pressAt(suspended, 0.5));
 }
 
+/** 每个 Combatant 的自守动作，用来让不相干的单位安静地过掉这一回合。 */
+const DEFEND: Readonly<Record<string, string>> = {
+  'tower-guard': 'brace',
+  'red-archer': 'retreat',
+  'vine-scout': 'coil',
+};
+
+/** 回答场上所有待答的提问。plan 决定每个 Combatant 答什么。 */
+function answerAll(
+  state: RunState,
+  plan: (combatantId: string) => unknown,
+): RunState {
+  let next = state;
+  for (const request of state.agentRequests) {
+    next = applyInput(next, {
+      type: 'agent_response',
+      requestId: request.id,
+      payload: plan(request.combatantId),
+    });
+  }
+  return next;
+}
+
+/** 全员自守：把场面安静下来，好断言某一件事。 */
+function allDefend(state: RunState): RunState {
+  return answerAll(state, (id) => ({ actionId: DEFEND[id], line: '' }));
+}
+
+/** 除了 except 全员自守，except 按给定的方式行动。 */
+function onlyOneActs(state: RunState, except: string, payload: unknown): RunState {
+  return answerAll(state, (id) => (id === except ? payload : { actionId: DEFEND[id], line: '' }));
+}
+
 function run(inputs: readonly PlayerInput[], options?: RunOptions): RunState {
   let state = startRun(BUILT_IN_GENERATION, SEED, options);
   for (const input of inputs) state = applyInput(state, input);
@@ -80,8 +121,10 @@ describe('startRun', () => {
     expect(state.encounter.turn).toBe(1);
     expect(state.encounter.player.hand).toHaveLength(5);
     expect(state.encounter.player.drawPile).toHaveLength(STARTING_DECK.length - 5);
-    expect(state.encounter.combatants).toHaveLength(1);
-    expect(state.encounter.combatants[0]?.hp).toBeGreaterThan(0);
+    expect(state.encounter.combatants).toHaveLength(3);
+    expect(state.encounter.combatants.every((c) => c.hp > 0)).toBe(true);
+    // 两个敌对 Faction 同场——这不是「玩家对一队敌人」
+    expect(new Set(state.encounter.combatants.map((c) => c.factionId)).size).toBe(2);
   });
 
   it('同一 seed 得到同一个起手局面', () => {
@@ -136,7 +179,7 @@ describe('Card 循环', () => {
   it('抽牌堆抽空后会把弃牌堆洗回来，牌的总数不变', () => {
     let state = startRun(BUILT_IN_GENERATION, SEED);
     for (let i = 0; i < 3 && state.phase === 'in_encounter'; i++) {
-      state = applyInput(state, { type: 'end_turn', atMs: 10_000 });
+      state = applyInput(allDefend(state), { type: 'end_turn', atMs: 10_000 * (i + 1) });
     }
 
     expect(state.encounter.player.hand).toHaveLength(5);
@@ -155,25 +198,29 @@ describe('Agent 与 Intent（ADR-0001）', () => {
     return startRun(BUILT_IN_GENERATION, SEED, { ...ALL_STRIKES, startedAtMs: 0 });
   }
 
+  /** 只回答塔卫那一条提问，其余留着不动。 */
   function answer(state: RunState, payload: unknown): RunState {
-    return applyInput(state, {
-      type: 'agent_response',
-      requestId: state.agentRequests[0]?.id ?? 'none',
-      payload,
-    });
+    const request = state.agentRequests.find((r) => r.combatantId === GUARD);
+    return applyInput(state, { type: 'agent_response', requestId: request?.id ?? 'none', payload });
+  }
+
+  /** 塔卫按指定动作打玩家，其余单位自守。 */
+  function guardActs(state: RunState, actionId: string): RunState {
+    return onlyOneActs(state, GUARD, { actionId, targetId: PLAYER_TARGET, line: '' });
   }
 
   it('Run 一开始就挂出一个 IntentRequest', () => {
     const state = fresh();
 
-    expect(state.agentRequests[0]?.combatantId).toBe(GUARD);
+    expect(state.agentRequests).toHaveLength(3); // 每个 Combatant 一条
+    expect(state.agentRequests.some((r) => r.combatantId === GUARD)).toBe(true);
     expect(state.agentRequests[0]?.requestedAtMs).toBe(0);
-    expect(state.encounter.combatants[0]?.intent).toBeNull();
+    expect(state.encounter.combatants.every((c) => c.intent === null)).toBe(true);
   });
 
   it('等待模型回答不会挡住玩家', () => {
     const state = fresh();
-    expect(state.agentRequests).toHaveLength(1);
+    expect(state.agentRequests.length).toBeGreaterThan(0);
     expect(isPlayerActing(state)).toBe(true);
     expect(canPlay(state, state.encounter.player.hand[0]!.instanceId)).toBe(true);
   });
@@ -181,34 +228,36 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   it('合法响应会落成这一回合的 Intent', () => {
     const state = answer(fresh(), { actionId: 'brace', line: '先稳住阵脚。' });
 
-    expect(state.agentRequests).toHaveLength(0);
+    expect(state.agentRequests.some((r) => r.combatantId === GUARD)).toBe(false);
     expect(state.encounter.combatants[0]?.intent).toEqual({
       actionId: 'brace',
+      targetId: null,
       line: '先稳住阵脚。',
       source: 'agent',
     });
   });
 
   it('Agent 按自己选的 Intent 行动', () => {
-    const braced = applyInput(answer(fresh(), { actionId: 'brace', line: '' }), {
+    const braced = applyInput(onlyOneActs(fresh(), GUARD, { actionId: 'brace', line: '' }), {
       type: 'end_turn',
       atMs: 1000,
     });
     expect(braced.encounter.combatants[0]?.block).toBe(5);
 
     const before = fresh();
-    const crushed = applyInput(answer(before, { actionId: 'crush', line: '' }), {
-      type: 'end_turn',
-      atMs: 1000,
-    });
+    const crushed = applyInput(guardActs(before, 'crush'), { type: 'end_turn', atMs: 1000 });
     expect(crushed.encounter.player.hp).toBe(before.encounter.player.hp - 11);
   });
 
   it('台词会被记进 journal', () => {
-    const state = applyInput(answer(fresh(), { actionId: 'slash', line: '别再往上走了。' }), {
-      type: 'end_turn',
-      atMs: 1000,
-    });
+    const state = applyInput(
+      onlyOneActs(fresh(), GUARD, {
+        actionId: 'slash',
+        targetId: PLAYER_TARGET,
+        line: '别再往上走了。',
+      }),
+      { type: 'end_turn', atMs: 1000 },
+    );
     expect(state.journal.some((line) => line.includes('别再往上走了。'))).toBe(true);
   });
 
@@ -233,7 +282,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
     it('畸形响应：引擎替它选，Run 继续', () => {
       for (const payload of [null, 'not json', 42, {}, { line: '只有台词' }, { actionId: 7 }]) {
         const state = answer(fresh(), payload);
-        expect(state.agentRequests).toHaveLength(0);
+        expect(state.agentRequests.some((r) => r.combatantId === GUARD)).toBe(false);
         expect(state.encounter.combatants[0]?.intent?.source).toBe('fallback');
         expect(state.phase).toBe('in_encounter');
       }
@@ -310,8 +359,10 @@ describe('完整一场', () => {
 
     expect(state.phase).toBe('ended');
     expect(state.outcome).toBe('victory');
-    expect(state.encounter.combatants.every((c) => c.hp <= 0)).toBe(true);
     expect(state.encounter.player.hp).toBeGreaterThan(0);
+    // 不需要清场：只要场上不再有两个敌对 Faction，剩下的那一方就放你过去
+    const living = state.encounter.combatants.filter((c) => c.hp > 0);
+    expect(new Set(living.map((c) => c.factionId)).size).toBeLessThanOrEqual(1);
   });
 
   it('同一 seed 加同一串输入必然得到同一个 Run', () => {
@@ -547,12 +598,14 @@ describe('Atom 系统', () => {
 describe('Atom 效果', () => {
   const foeOf = (state: RunState): CombatantState => state.encounter.combatants[0]!;
 
+  /** 只让塔卫按指定动作打玩家，其余单位自守。 */
   function answerWith(state: RunState, actionId: string): RunState {
-    return applyInput(state, {
-      type: 'agent_response',
-      requestId: state.agentRequests[0]!.id,
-      payload: { actionId, line: '' },
-    });
+    const action = state.encounter.combatants[0]?.actions.find((a) => a.id === actionId);
+    const payload =
+      action?.targeting === 'enemy'
+        ? { actionId, targetId: PLAYER_TARGET, line: '' }
+        : { actionId, line: '' };
+    return onlyOneActs(state, 'tower-guard', payload);
   }
 
   it('pierce 无视格挡', () => {
@@ -755,14 +808,14 @@ describe('AgentRequest 管道（ADR-0010）', () => {
 
   it('提问不会跨回合堆积：没回答的问题在回合推进时作废', () => {
     const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
-    expect(state.agentRequests).toHaveLength(1);
-    const first = state.agentRequests[0]!;
+    expect(state.agentRequests).toHaveLength(3); // 每个 Combatant 一条
+    const firstIds = new Set(state.agentRequests.map((r) => r.id));
 
     // 一直不回答，直接结束回合
     const next = applyInput(state, { type: 'end_turn', atMs: 5000 });
 
-    expect(next.agentRequests).toHaveLength(1);
-    expect(next.agentRequests[0]!.id).not.toBe(first.id);
+    expect(next.agentRequests).toHaveLength(3);
+    expect(next.agentRequests.some((r) => firstIds.has(r.id))).toBe(false);
     // 上一回合的对手仍然行动了——引擎替它选（ADR-0001）
     expect(next.encounter.player.hp).toBeLessThan(state.encounter.player.hp);
   });
@@ -771,5 +824,126 @@ describe('AgentRequest 管道（ADR-0010）', () => {
     const ended = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
     expect(ended.phase).toBe('ended');
     expect(ended.agentRequests).toHaveLength(0);
+  });
+});
+
+describe('多方混战与站队', () => {
+  const GUARD = 'tower-guard';
+  const ARCHER = 'red-archer';
+  const SCOUT = 'vine-scout';
+  const at = (state: RunState, id: string): CombatantState =>
+    state.encounter.combatants.find((c) => c.id === id)!;
+
+  function fresh(options?: RunOptions): RunState {
+    return startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+  }
+
+  it('每个 Combatant 各有一条提问，即使同属一个 Faction', () => {
+    const state = fresh();
+    const asked = state.agentRequests.map((r) => r.combatantId).sort();
+
+    expect(asked).toEqual([ARCHER, SCOUT, GUARD].sort());
+    // 同派的两个单位分别被问——合并成一次调用是 ADR-0004 明确拒绝的
+    const redRequests = state.agentRequests.filter((r) => r.factionId === 'red-ring');
+    expect(redRequests).toHaveLength(2);
+  });
+
+  it('Agent 可以选择攻击敌对派系，而不是玩家', () => {
+    let state = fresh();
+    state = answerAll(state, (id) =>
+      id === SCOUT
+        ? { actionId: 'coil', line: '' }
+        : { actionId: 'slash', targetId: SCOUT, line: '碍事。' },
+    );
+    // 弓手没有 slash，它会被判非法并回退到打玩家；塔卫的选择是合法的
+    expect(at(state, GUARD).intent?.targetId).toBe(SCOUT);
+
+    const scoutHp = at(state, SCOUT).hp;
+    const playerHp = state.encounter.player.hp;
+    state = applyInput(state, { type: 'end_turn', atMs: 1000 });
+
+    expect(at(state, SCOUT).hp).toBeLessThan(scoutHp); // 青蔓挨了赤环一刀
+    expect(state.encounter.player.hp).toBeLessThan(playerHp); // 弓手回退去打了玩家
+    expect(state.journal.some((line) => line.includes('攻向青蔓斥候'))).toBe(true);
+  });
+
+  it('不能打自己人，也不能打不存在的目标', () => {
+    const state = fresh();
+
+    // 塔卫想打同派的弓手
+    const sameFaction = answerAll(state, (id) =>
+      id === GUARD ? { actionId: 'slash', targetId: ARCHER, line: '' } : { actionId: DEFEND[id] },
+    );
+    expect(at(sameFaction, GUARD).intent?.source).toBe('fallback');
+
+    // 目标根本不存在
+    const ghost = answerAll(state, (id) =>
+      id === GUARD ? { actionId: 'slash', targetId: '幽灵', line: '' } : { actionId: DEFEND[id] },
+    );
+    expect(at(ghost, GUARD).intent?.source).toBe('fallback');
+  });
+
+  it('玩家打谁被记进站队账本，偏袒的是挨打最少的那一方', () => {
+    let state = fresh(deckOf('strike'));
+    expect(favoredFaction(state)).toBeNull(); // 还没出手，谈不上偏袒
+
+    const scout = state.encounter.player.hand[0]!;
+    state = applyInput(state, {
+      type: 'play_card',
+      instanceId: scout.instanceId,
+      atMs: 100,
+      targetId: SCOUT,
+    });
+
+    expect(state.encounter.damageDealtTo['green-vine']).toBe(6);
+    expect(state.encounter.damageDealtTo['red-ring']).toBeUndefined();
+    // 打了青蔓，就是站在赤环那边
+    expect(favoredFaction(state)).toBe('red-ring');
+  });
+
+  it('打成平手就没有偏袒', () => {
+    let state = fresh(deckOf('strike'));
+    for (const target of [SCOUT, GUARD]) {
+      const card = state.encounter.player.hand[0]!;
+      state = applyInput(state, {
+        type: 'play_card',
+        instanceId: card.instanceId,
+        atMs: 100,
+        targetId: target,
+      });
+    }
+
+    expect(state.encounter.damageDealtTo['green-vine']).toBe(6);
+    expect(state.encounter.damageDealtTo['red-ring']).toBe(6);
+    expect(favoredFaction(state)).toBeNull();
+  });
+
+  it('打光一方就能走：剩下的那一方放你过去，不需要清场', () => {
+    let state = fresh(deckOf('strike'));
+
+    // 只打青蔓斥候，把它打掉；赤环两人一直自守
+    for (let turn = 0; turn < 12 && state.phase === 'in_encounter'; turn++) {
+      state = allDefend(state);
+      while (state.encounter.phase === 'player_turn') {
+        const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
+        if (!card) break;
+        state = applyInput(state, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: SCOUT,
+        });
+      }
+      if (state.phase !== 'in_encounter') break;
+      state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+
+    expect(state.phase).toBe('ended');
+    expect(state.outcome).toBe('victory');
+    // 赤环两人还站着——他们放你过去
+    expect(at(state, GUARD).hp).toBeGreaterThan(0);
+    expect(at(state, ARCHER).hp).toBeGreaterThan(0);
+    expect(at(state, SCOUT).hp).toBe(0);
+    expect(favoredFaction(state)).toBe('red-ring');
   });
 });

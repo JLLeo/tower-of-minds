@@ -97,19 +97,24 @@ export function builtInAgents(): readonly AgentState[] {
       factionId: 'red-ring',
       name: '赤环',
       persona: '守序而好战，认死理，看不起摇摆的人。',
-      goal: '把外来者挡在塔的下层，但不想为此赔上自己人。',
+      goal:
+        '把外来者挡在塔的下层。但真正让你咽不下这口气的是青蔓——他们私通塔外、偷运补给，' +
+        '你早想动手，只是不愿意两线开战。谁先露出破绽，你就先收拾谁。',
     },
     {
       factionId: 'green-vine',
       name: '青蔓',
       persona: '谨慎，记仇，擅长等别人先出手。',
-      goal: '保住塔里的补给线，谁挡路就记谁一笔。',
+      goal:
+        '保住补给线。赤环封死了塔道、还想拿你当叛徒办，你恨他们更甚于恨外来者——' +
+        '只是你人手不够，得等一个他们分神的时机。',
     },
   ];
 }
 
 /**
- * 第 1 层的对手。它的下一步由所属 Faction 的 Agent 决定。
+ * 第 1 层的场面。两个 Faction 同场，它们之间也在打——玩家集火谁、放过谁，
+ * 本身就是表态。这不是「玩家对一队敌人」。
  */
 export function floorOneCombatants(): readonly CombatantState[] {
   return [
@@ -117,13 +122,43 @@ export function floorOneCombatants(): readonly CombatantState[] {
       id: 'tower-guard',
       name: '塔卫',
       factionId: 'red-ring',
-      hp: 45,
-      maxHp: 45,
+      hp: 34,
+      maxHp: 34,
       block: 0,
       actions: [
-        { id: 'slash', kind: 'attack', amount: 7, description: '挥刀劈砍，造成 7 点伤害' },
-        { id: 'crush', kind: 'attack', amount: 11, description: '沉重的下劈，造成 11 点伤害' },
-        { id: 'brace', kind: 'defend', amount: 5, description: '举盾自守，获得 5 点格挡' },
+        { id: 'slash', kind: 'attack', amount: 7, targeting: 'enemy', description: '挥刀劈砍，造成 7 点伤害' },
+        { id: 'crush', kind: 'attack', amount: 11, targeting: 'enemy', description: '沉重的下劈，造成 11 点伤害' },
+        { id: 'brace', kind: 'defend', amount: 5, targeting: 'self', description: '举盾自守，获得 5 点格挡' },
+      ],
+      intent: null,
+      statuses: NO_STATUSES,
+    },
+    {
+      id: 'red-archer',
+      name: '赤环弓手',
+      factionId: 'red-ring',
+      hp: 22,
+      maxHp: 22,
+      block: 0,
+      actions: [
+        { id: 'loose', kind: 'attack', amount: 5, targeting: 'enemy', description: '放箭，造成 5 点伤害' },
+        { id: 'volley', kind: 'attack', amount: 8, targeting: 'enemy', description: '压制射击，造成 8 点伤害' },
+        { id: 'retreat', kind: 'defend', amount: 4, targeting: 'self', description: '后撤半步，获得 4 点格挡' },
+      ],
+      intent: null,
+      statuses: NO_STATUSES,
+    },
+    {
+      id: 'vine-scout',
+      name: '青蔓斥候',
+      factionId: 'green-vine',
+      hp: 26,
+      maxHp: 26,
+      block: 0,
+      actions: [
+        { id: 'lash', kind: 'attack', amount: 6, targeting: 'enemy', description: '藤鞭抽击，造成 6 点伤害' },
+        { id: 'snare', kind: 'attack', amount: 9, targeting: 'enemy', description: '缠住对手狠抽，造成 9 点伤害' },
+        { id: 'coil', kind: 'defend', amount: 6, targeting: 'self', description: '蜷起藤甲，获得 6 点格挡' },
       ],
       intent: null,
       statuses: NO_STATUSES,

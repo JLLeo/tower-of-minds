@@ -1,4 +1,5 @@
 import { INTENT_TIMEOUT_MS } from './content.js';
+import { PLAYER_TARGET } from './types.js';
 import type {
   AgentRequest,
   AgentRequestKind,
@@ -111,7 +112,7 @@ function settleIntent(
   const combatant = state.encounter.combatants.find((c) => c.id === combatantId);
   if (!combatant) return state;
 
-  const parsed = timedOut ? null : parseIntent(payload, combatant.actions);
+  const parsed = timedOut ? null : parseIntent(state, combatant, payload);
   const intent = parsed ?? fallbackIntent(combatant);
   const note = parsed
     ? `${combatant.name}打定了主意。`
@@ -131,23 +132,58 @@ function settleIntent(
   };
 }
 
+// ---------------------------------------------------------------- 合法目标
+
+/**
+ * 一个动作能打谁。自我防御类没有目标；攻击类可以打玩家，也可以打**别的 Faction 的**
+ * Combatant——同派不会互相攻击，但敌对派系之间会。合法集由引擎算出，模型只能从中选。
+ */
+export function legalTargetsFor(
+  state: RunState,
+  combatant: CombatantState,
+  action: CombatantAction,
+): readonly string[] {
+  if (action.targeting === 'self') return [];
+  return [
+    PLAYER_TARGET,
+    ...state.encounter.combatants
+      .filter((c) => c.hp > 0 && c.factionId !== combatant.factionId)
+      .map((c) => c.id),
+  ];
+}
+
 // ---------------------------------------------------------------- intent 的校验与回退
 
 /**
  * 校验模型的原样响应（ADR-0001）。凡是不在合法动作集里的东西一律拒绝——
  * 引擎不去猜模型的意思，猜错的代价是玩家学不到规则。
  */
-function parseIntent(payload: unknown, actions: readonly CombatantAction[]): Intent | null {
+function parseIntent(
+  state: RunState,
+  combatant: CombatantState,
+  payload: unknown,
+): Intent | null {
   if (typeof payload !== 'object' || payload === null) return null;
   const record = payload as Record<string, unknown>;
 
   const actionId = record['actionId'];
   if (typeof actionId !== 'string') return null;
-  if (!actions.some((action) => action.id === actionId)) return null;
+  const action = combatant.actions.find((a) => a.id === actionId);
+  if (!action) return null;
+
+  // 目标同样要落在合法集里。模型想打一个不存在的、或者自己同派的目标，一律拒绝。
+  const legal = legalTargetsFor(state, combatant, action);
+  let targetId: string | null = null;
+  if (legal.length > 0) {
+    const proposed = record['targetId'];
+    if (typeof proposed !== 'string' || !legal.includes(proposed)) return null;
+    targetId = proposed;
+  }
 
   const line = record['line'];
   return {
     actionId,
+    targetId,
     line: typeof line === 'string' ? line.slice(0, MAX_LINE_LENGTH) : '',
     source: 'agent',
   };
@@ -163,7 +199,14 @@ export function fallbackIntent(combatant: CombatantState): Intent {
     (action) => action.kind === (wantsDefend ? 'defend' : 'attack'),
   );
   const action = preferred ?? combatant.actions[0];
-  return { actionId: action?.id ?? '', line: '', source: 'fallback' };
+  // 回退永远打玩家：它刻意是无脑的那条路。Agent 选择去打别的派系，因此是一个
+  // 玩家看得出来的、比回退更聪明的决定。
+  return {
+    actionId: action?.id ?? '',
+    targetId: action?.targeting === 'enemy' ? PLAYER_TARGET : null,
+    line: '',
+    source: 'fallback',
+  };
 }
 
 /** 某个 kind 现在有没有待回答的提问。渲染层用它显示「正在盘算」。 */
