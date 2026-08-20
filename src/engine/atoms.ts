@@ -26,7 +26,8 @@ export type EffectTemplate =
   | { readonly kind: 'apply_weaken' }
   | { readonly kind: 'draw_cards'; readonly amount: number }
   | { readonly kind: 'gain_energy'; readonly amount: number }
-  | { readonly kind: 'recall_card'; readonly amount: number };
+  | { readonly kind: 'recall_card'; readonly amount: number }
+  | { readonly kind: 'parley' };
 
 export interface AtomDefinition {
   readonly id: string;
@@ -71,7 +72,7 @@ export const ATOMS: readonly AtomDefinition[] = [
   { id: 'reflex', name: '应', axis: 'execution', weight: 3, flavor: '本次即使 Miss 也按 Good 结算', pendingTicket: '#5' },
 
   // 派系轴 —— 效果随 Standing 在 #8 落地。
-  { id: 'parley', name: '交', axis: 'faction', weight: 3, flavor: '目标 Faction 的 Standing +1', pendingTicket: '#8' },
+  { id: 'parley', name: '交', axis: 'faction', weight: 3, template: { kind: 'parley' } },
 
   // 禁忌 Atom —— 只有 Mutation 能拿到（#13）。权重为负，因此更强也更便宜。
   { id: 'sacrifice', name: '献', axis: 'damage', weight: -2, flavor: '失去 5 点生命，本卡其余 Atom 效果翻倍', forbidden: true, pendingTicket: '#13' },
@@ -116,6 +117,8 @@ export function describeAtom(atom: AtomDefinition): string {
       return `获得 ${t.amount} 点能量`;
     case 'recall_card':
       return `从弃牌堆取回 ${t.amount} 张牌`;
+    case 'parley':
+      return '向目标所属的 Faction 示好，态度 +1';
   }
 }
 
@@ -215,5 +218,7 @@ function materialize(template: EffectTemplate, targetId: string | undefined): Ef
       return { kind: 'gain_energy', amount: template.amount };
     case 'recall_card':
       return { kind: 'recall_card', amount: template.amount };
+    case 'parley':
+      return targetId ? { kind: 'parley', targetId } : null;
   }
 }

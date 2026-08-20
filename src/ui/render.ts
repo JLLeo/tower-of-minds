@@ -5,6 +5,7 @@ import {
   canPlay,
   cardById,
   currentSiding,
+  standings,
   defaultTarget,
   definitionOf,
   intendedAction,
@@ -12,6 +13,7 @@ import {
 } from '../engine/run.js';
 import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
 import { NORMAL_FLOORS } from '../engine/content.js';
+import { memoriesOf } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
@@ -48,6 +50,7 @@ export function render(
     playerView(state),
     handView(state, view, dispatch),
     controls(state, dispatch),
+    memoryView(state),
     journalView(state),
     ...(state.phase === 'choosing_favor' ? [favorView(state, dispatch)] : []),
     ...(state.phase === 'ended' ? [outcomeView(state, restart)] : []),
@@ -71,7 +74,7 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 }
 
 function header(state: RunState): HTMLElement {
-  const standing = Object.entries(state.standing)
+  const standing = Object.entries(standings(state))
     .map(([factionId, value]) => `${factionNameOf(state, factionId)} ${value}`)
     .join(' · ');
 
@@ -352,6 +355,57 @@ function controls(state: RunState, dispatch: Dispatch): HTMLElement {
   );
   section.appendChild(endTurn);
   return section;
+}
+
+/**
+ * 它记得你做过什么。看不见的 Memory 等于不存在——玩家必须能验证一个 Faction 的态度
+ * 从何而来，否则它的针对性只会像是无理由的刁难。
+ */
+function memoryView(state: RunState): HTMLElement {
+  const section = el('section', 'memories');
+  const values = standings(state);
+
+  for (const agent of state.agents) {
+    const entries = memoriesOf(state, agent.factionId);
+    if (entries.length === 0) continue;
+
+    const box = document.createElement('details');
+    box.className = 'memory';
+    const summary = document.createElement('summary');
+    summary.textContent = `${agent.name}　态度 ${values[agent.factionId] ?? 0}`;
+    box.appendChild(summary);
+
+    for (const line of memorySummary(state, agent.factionId)) {
+      box.appendChild(el('p', undefined, line));
+    }
+    section.appendChild(box);
+  }
+  return section;
+}
+
+/** 把条目摊成人话。和喂给模型的是同一批事实，只是排版不同。 */
+function memorySummary(state: RunState, factionId: string): readonly string[] {
+  const cards = new Set<string>();
+  let harm = 0;
+  let sided = 0;
+  let parley = 0;
+
+  for (const entry of memoriesOf(state, factionId)) {
+    if (entry.kind === 'card_played') cards.add(entry.cardId);
+    else if (entry.kind === 'harmed') harm += entry.amount;
+    else if (entry.kind === 'sided') sided += 1;
+    else parley += 1;
+  }
+
+  const lines: string[] = [];
+  if (sided > 0) lines.push(`你有 ${sided} 次把它留到了最后。`);
+  if (parley > 0) lines.push(`你对它示好过 ${parley} 次。`);
+  if (harm > 0) lines.push(`你一共伤了它 ${harm} 点。`);
+  if (cards.size > 0) {
+    const names = [...cards].map((id) => cardById(id)?.name ?? id).join('、');
+    lines.push(`它见过你打出：${names}。`);
+  }
+  return lines;
 }
 
 function journalView(state: RunState): HTMLElement {

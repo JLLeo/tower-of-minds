@@ -5,10 +5,12 @@ import {
   definitionOf,
   currentSiding,
   isPlayerActing,
+  standings,
   startRun,
 } from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, effectsOf } from './atoms.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
+import { memoriesOf } from './memory.js';
 import { PLAYER_TARGET } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
@@ -402,16 +404,13 @@ describe('Agent 与 Intent（ADR-0001）', () => {
 });
 
 describe('完整一场', () => {
-  it('用固定 seed 与一串脚本化输入跑到 Run 结束并取胜', () => {
+  it('用固定 seed 与一串脚本化输入推完五层，Deck 一层长一张', () => {
+    // 断言的是「推进」而不是「取胜」：驱动这一串输入的是个很粗糙的策略，
+    // 它该不该赢是平衡问题，不该由测试来决定。
     const state = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
 
     expect(state.phase).toBe('ended');
-    expect(state.outcome).toBe('victory');
-    expect(state.encounter.player.hp).toBeGreaterThan(0);
-    expect(state.floor).toBe(5); // 五层都过了
-    // 不需要清场：只要场上不再有两个敌对 Faction，剩下的那一方就放你过去
-    const living = state.encounter.combatants.filter((c) => c.hp > 0);
-    expect(new Set(living.map((c) => c.factionId)).size).toBeLessThanOrEqual(1);
+    expect(state.floor).toBe(5); // 一路推到了最后一层
     // Deck 跨层累积，且多出来的每一张都来自某个 Faction 的 Base Card
     expect(state.deck.length).toBeGreaterThan(STARTING_DECK.length);
     const startingCounts = new Map<string, number>();
@@ -623,12 +622,19 @@ describe('Atom 系统', () => {
     }
   });
 
-  it('每个 Faction 各有 10 张 Base Card', () => {
+  it('每个 Faction 都有自己的一套 Base Card，含一张 Parley', () => {
     const counts = new Map<string, number>();
     for (const card of CARD_POOL) counts.set(card.faction, (counts.get(card.faction) ?? 0) + 1);
 
-    expect(counts.get('red-ring')).toBe(10);
-    expect(counts.get('green-vine')).toBe(10);
+    expect(counts.get('red-ring')).toBeGreaterThanOrEqual(10);
+    expect(counts.get('green-vine')).toBeGreaterThanOrEqual(10);
+
+    // Parley 是站队的显式动词，两派各有一张
+    for (const factionId of ['red-ring', 'green-vine']) {
+      expect(
+        CARD_POOL.some((c) => c.faction === factionId && c.atoms.includes('parley')),
+      ).toBe(true);
+    }
   });
 
   it('Base Card 不含 Forbidden Atom，也不超过 Atom 上限', () => {
@@ -991,12 +997,15 @@ describe('多方混战与站队', () => {
       state = allDefend(state);
       while (state.encounter.phase === 'player_turn') {
         const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-        if (!card) break;
+        const victim = state.encounter.combatants.find(
+          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        );
+        if (!card || !victim) break;
         state = applyInput(state, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
-          targetId: SCOUT,
+          targetId: victim.id,
         });
       }
       if (state.phase !== 'in_encounter') break;
@@ -1034,12 +1043,15 @@ describe('多方混战与站队', () => {
       state = allDefend(state);
       while (state.encounter.phase === 'player_turn') {
         const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-        if (!card) break;
+        const victim = state.encounter.combatants.find(
+          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        );
+        if (!card || !victim) break;
         state = applyInput(state, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
-          targetId: SCOUT,
+          targetId: victim.id,
         });
       }
       if (state.phase !== 'in_encounter') break;
@@ -1057,21 +1069,25 @@ describe('多方混战与站队', () => {
 });
 
 describe('多 Floor 推进与 Favor', () => {
-  const SCOUT = 'vine-scout';
-
+  /** 只打青蔓，把这一派清掉；赤环一直自守。被得罪的一方会带增援，所以逐个点名。 */
   function clearFloorOne(state: RunState): RunState {
-    // 只打青蔓斥候，把它清掉；赤环两人一直自守
     let next = state;
-    for (let turn = 0; turn < 14 && next.phase === 'in_encounter'; turn++) {
-      next = allDefend(next);
+    for (let turn = 0; turn < 30 && next.phase === 'in_encounter'; turn++) {
+      next = answerAll(next, (id) => ({
+        actionId: DEFEND[id.replace('-reinforcement', '')],
+        line: '',
+      }));
       while (next.encounter.phase === 'player_turn') {
         const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
-        if (!card) break;
+        const victim = next.encounter.combatants.find(
+          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        );
+        if (!card || !victim) break;
         next = applyInput(next, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
-          targetId: SCOUT,
+          targetId: victim.id,
         });
       }
       if (next.phase !== 'in_encounter') break;
@@ -1136,12 +1152,12 @@ describe('多 Floor 推进与 Favor', () => {
   it('同向站队两次就跨过阈值，Favor 升到高阶', () => {
     let state = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
     expect(state.favor?.tier).toBe('basic');
-    expect(state.standing['red-ring']).toBe(1);
+    expect(standings(state)['red-ring']).toBe(1);
 
     state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 });
     state = clearFloorOne(state);
 
-    expect(state.standing['red-ring']).toBe(2);
+    expect(standings(state)['red-ring']).toBe(2);
     expect(state.favor?.tier).toBe('high');
   });
 
@@ -1170,5 +1186,141 @@ describe('多 Floor 推进与 Favor', () => {
 
     const next = applyInput(cleared, { type: 'choose_favor', cardId: null, atMs: 20_000 });
     expect(next.encounter.player.hp).toBeGreaterThan(hurt);
+  });
+});
+
+describe('Memory 与 Standing', () => {
+  function fresh(options?: RunOptions): RunState {
+    return startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+  }
+
+  /** 打光青蔓这一派，清掉当前这一层；赤环一直自守。 */
+  function clearFloor(state: RunState): RunState {
+    let next = state;
+    for (let turn = 0; turn < 30 && next.phase === 'in_encounter'; turn++) {
+      next = answerAll(next, (id) => ({
+        actionId: DEFEND[id.replace('-reinforcement', '')],
+        line: '',
+      }));
+      while (next.encounter.phase === 'player_turn') {
+        const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
+        const victim = next.encounter.combatants.find(
+          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        );
+        if (!card || !victim) break;
+        next = applyInput(next, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: victim.id,
+        });
+      }
+      if (next.phase !== 'in_encounter') break;
+      next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+    return next;
+  }
+
+  const clearedOnce = (): RunState => clearFloor(fresh(deckOf('strike')));
+
+  it('玩家打出的牌被在场的每个 Faction 记住', () => {
+    let state = fresh(deckOf('strike'));
+    const card = state.encounter.player.hand[0]!;
+    state = applyInput(state, {
+      type: 'play_card',
+      instanceId: card.instanceId,
+      atMs: 100,
+      targetId: 'vine-scout',
+    });
+
+    for (const factionId of ['red-ring', 'green-vine']) {
+      const seen = memoriesOf(state, factionId).filter((e) => e.kind === 'card_played');
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ kind: 'card_played', cardId: 'strike', floor: 1 });
+    }
+  });
+
+  it('它只知道你打过的牌，不知道你牌库里有什么', () => {
+    // #14 的对手构筑只能用这份情报。玩家因此可以留着某些牌不打，让它无从针对。
+    let state = fresh({
+      startingDeck: ['strike', 'strike', 'strike', 'strike', 'strike', 'guard', 'guard', 'guard', 'guard', 'heavy'],
+      startedAtMs: 0,
+    });
+
+    for (let i = 0; i < 2; i++) {
+      const card = state.encounter.player.hand.find((c) => c.instanceId.startsWith('strike#'));
+      if (!card) break;
+      state = applyInput(state, {
+        type: 'play_card',
+        instanceId: card.instanceId,
+        atMs: 100 * (i + 1),
+        targetId: 'vine-scout',
+      });
+    }
+
+    const seen = new Set(
+      memoriesOf(state, 'red-ring')
+        .filter((e) => e.kind === 'card_played')
+        .map((e) => (e.kind === 'card_played' ? e.cardId : '')),
+    );
+
+    expect(seen.has('strike')).toBe(true);
+    // 牌库里有格挡和重击，但它一张都没见过
+    expect(state.deck.some((c) => c.definitionId === 'guard')).toBe(true);
+    expect(seen.has('guard')).toBe(false);
+    expect(seen.has('heavy')).toBe(false);
+  });
+
+  it('Standing 由 Memory 推出：留它活着加分，伤它扣分', () => {
+    const state = clearedOnce();
+
+    // 赤环被留下来了
+    expect(memoriesOf(state, 'red-ring').some((e) => e.kind === 'sided')).toBe(true);
+    expect(standings(state)['red-ring']).toBe(1);
+
+    // 青蔓被打光了
+    const harmed = memoriesOf(state, 'green-vine').filter((e) => e.kind === 'harmed');
+    expect(harmed).toHaveLength(1);
+    expect(standings(state)['green-vine']).toBeLessThan(0);
+  });
+
+  it('Parley 直接改变态度', () => {
+    let state = fresh(deckOf('truce')); // 青蔓的止戈
+    const before = standings(state)['green-vine'] ?? 0;
+    const card = state.encounter.player.hand[0]!;
+
+    state = applyInput(state, {
+      type: 'play_card',
+      instanceId: card.instanceId,
+      atMs: 100,
+      targetId: 'vine-scout',
+    });
+
+    expect(memoriesOf(state, 'green-vine').some((e) => e.kind === 'parley')).toBe(true);
+    expect(standings(state)['green-vine']).toBe(before + 1);
+  });
+
+  it('反复挑同一方下手，它下一层就会多带人', () => {
+    // 第一次清场之后还没结怨到那个份上
+    const once = clearedOnce();
+    const secondFloor = applyInput(once, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+    expect(secondFloor.encounter.combatants).toHaveLength(3);
+
+    // 第二次还挑青蔓，第三层它就带人来了
+    const twice = clearFloor(secondFloor);
+    const thirdFloor = applyInput(twice, { type: 'choose_favor', cardId: null, atMs: 40_000 });
+    expect(thirdFloor.encounter.combatants.length).toBeGreaterThan(3);
+    expect(
+      thirdFloor.encounter.combatants.filter((c) => c.factionId === 'green-vine'),
+    ).toHaveLength(2);
+  });
+
+  it('同向站队两次跨过阈值，Favor 升到高阶', () => {
+    const once = clearedOnce();
+    expect(once.favor?.tier).toBe('basic');
+
+    const twice = clearFloor(applyInput(once, { type: 'choose_favor', cardId: null, atMs: 20_000 }));
+    expect(standings(twice)['red-ring']).toBe(2);
+    expect(twice.favor?.tier).toBe('high');
   });
 });

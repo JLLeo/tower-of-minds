@@ -1,6 +1,13 @@
 import { createRng, nextInt, shuffle, type Rng } from './rng.js';
 import { effectsOf } from './atoms.js';
 import {
+  allStandings,
+  offendedFactions,
+  remember,
+  rememberCardPlayed,
+  standingOf,
+} from './memory.js';
+import {
   dropRequests,
   expireRequests,
   fallbackIntent,
@@ -64,7 +71,7 @@ export function startRun(
     nextCardSeq: deckIds.length,
     floor: 0,
     deck,
-    standing: {},
+    memories: {},
     favor: null,
     phase: 'in_encounter',
     encounter: EMPTY_ENCOUNTER,
@@ -136,7 +143,7 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
         turn: 1,
         phase: 'player_turn',
         player,
-        combatants: combatantsForFloor(floor),
+        combatants: combatantsForFloor(floor, offendedFactions(state)),
         pending: null,
         damageDealtTo: {},
         executionUsedThisTurn: false,
@@ -250,6 +257,11 @@ export function livingCombatants(state: RunState): readonly CombatantState[] {
   return state.encounter.combatants.filter((c) => c.hp > 0);
 }
 
+/** 每个 Faction 对玩家的态度，由 Memory 推出。界面与 prompt 都读它。 */
+export function standings(state: RunState): Readonly<Record<string, number>> {
+  return allStandings(state);
+}
+
 /** 玩家没有指定目标时打谁。渲染层读它来高亮，不自己再推一遍。 */
 export function defaultTarget(state: RunState): string | undefined {
   return livingCombatants(state)[0]?.id;
@@ -339,12 +351,8 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
     };
   }
 
-  return checkOutcome(
-    discard(
-      applyEffects({ ...state, journal, encounter: { ...encounter, player } }, effects),
-      card,
-    ),
-  );
+  const seen = rememberCardPlayed({ ...state, journal, encounter: { ...encounter, player } }, definition.id);
+  return checkOutcome(discard(applyEffects(seen, effects), card));
 }
 
 /** 结算完毕，这张牌落进弃牌堆。 */
@@ -416,6 +424,17 @@ function applyEffect(state: RunState, effect: Effect): RunState {
 
     case 'recall_card':
       return recall(state, effect.amount);
+
+    case 'parley': {
+      const target = encounter.combatants.find((c) => c.id === effect.targetId);
+      if (!target) return state;
+      const who = state.agents.find((a) => a.factionId === target.factionId)?.name ?? '对方';
+      return remember(
+        { ...state, journal: [...state.journal, `你向${who}递出了善意。`] },
+        target.factionId,
+        { kind: 'parley', floor: state.floor },
+      );
+    }
   }
 }
 
@@ -783,20 +802,31 @@ function clearFloor(state: RunState): RunState {
     };
   }
 
-  const factionId = rewardedFaction(state);
-  const standing = factionId
-    ? { ...state.standing, [factionId]: (state.standing[factionId] ?? 0) + 1 }
-    : state.standing;
-  const offer = buildFavor(state, factionId, standing);
+  // 这一场发生的事写进 Memory，Standing 由 Memory 推出，不另存一份。
+  let remembered = state;
+  for (const [factionId, amount] of Object.entries(state.encounter.damageDealtTo)) {
+    if (amount <= 0) continue;
+    remembered = remember(remembered, factionId, {
+      kind: 'harmed',
+      floor: state.floor,
+      amount,
+    });
+  }
 
-  const agentName = state.agents.find((a) => a.factionId === factionId)?.name;
+  const factionId = rewardedFaction(state);
+  if (factionId) {
+    remembered = remember(remembered, factionId, { kind: 'sided', floor: state.floor });
+  }
+
+  const offer = buildFavor(remembered, factionId);
+  const agentName = remembered.agents.find((a) => a.factionId === factionId)?.name;
+
   return {
-    ...state,
+    ...remembered,
     phase: 'choosing_favor',
     favor: offer,
-    standing,
     journal: [
-      ...state.journal,
+      ...remembered.journal,
       agentName ? `${agentName}记下了你这一场的选择。` : '没有哪一方觉得欠你人情。',
     ],
   };
@@ -806,11 +836,7 @@ function clearFloor(state: RunState): RunState {
  * 这一层的报酬。给的人是你偏袒过的那一方；给多少取决于它还剩几个人——
  * 你保得越好，它给得越大方。打成平手就没有人欠你人情。
  */
-function buildFavor(
-  state: RunState,
-  factionId: string | null,
-  standing: Readonly<Record<string, number>>,
-): FavorOffer {
+function buildFavor(state: RunState, factionId: string | null): FavorOffer {
   if (!factionId) return { factionId: '', tier: 'basic', choices: [] };
 
   // 给多少取决于这一方还剩几个人——你保得越好，它给得越大方。
@@ -821,7 +847,7 @@ function buildFavor(
 
   const pool = baseCardsOf(factionId).map((card) => card.id);
   const [, shuffled] = shuffle(state.rng, pool);
-  const tier = (standing[factionId] ?? 0) >= HIGH_FAVOR_THRESHOLD ? 'high' : 'basic';
+  const tier = standingOf(state, factionId) >= HIGH_FAVOR_THRESHOLD ? 'high' : 'basic';
 
   // 高阶 Favor 本该给的是一次 Fusion 机会而不是一张牌——那是 #13。
   return { factionId, tier, choices: shuffled.slice(0, count) };
@@ -834,7 +860,7 @@ function buildFavor(
  * 五层的 Run 在数学上赢不了。与其塞一个通用回血，不如把恢复接在站队上——谁欠你人情，
  * 谁替你处理伤口；打成平手就没人管你。数值需要靠试玩调。
  */
-const FAVOR_HEAL: Readonly<Record<FavorOffer['tier'], number>> = { basic: 6, high: 10 };
+const FAVOR_HEAL: Readonly<Record<FavorOffer['tier'], number>> = { basic: 10, high: 16 };
 
 /** 收下（或放弃）这一层的报酬，然后上一层。 */
 function takeFavor(state: RunState, cardId: string | null, atMs: number): RunState {

@@ -81,6 +81,20 @@ export interface CombatantState {
 }
 
 /**
+ * Agent 记住的一条事实。结构化而不是自由文本——它要同时喂 prompt、推出 Standing、
+ * 还要摊开给玩家看（ADR-0003：Run 结束即清空）。
+ */
+export type MemoryEntry =
+  /** 你在它面前打出过这张牌。#14 的对手构筑只能用它见过的牌。 */
+  | { readonly kind: 'card_played'; readonly floor: number; readonly cardId: string }
+  /** 你伤了它多少。 */
+  | { readonly kind: 'harmed'; readonly floor: number; readonly amount: number }
+  /** 你把它留到了最后——这一层是它放你过去的。 */
+  | { readonly kind: 'sided'; readonly floor: number }
+  /** 你对它示好过。 */
+  | { readonly kind: 'parley'; readonly floor: number };
+
+/**
  * 一个 Faction 的持久心智（ADR-0010）。它在战斗中选 Intent、在 Fusion 时决定取舍、
  * 在层间为自己构筑——这些出自同一个 Agent，共享同一份性格与目标。
  * Memory 挂在这里，在 #8 落地。
@@ -160,7 +174,8 @@ export type Effect =
   | { readonly kind: 'apply_weaken'; readonly targetId: string }
   | { readonly kind: 'draw_cards'; readonly amount: number }
   | { readonly kind: 'gain_energy'; readonly amount: number }
-  | { readonly kind: 'recall_card'; readonly amount: number };
+  | { readonly kind: 'recall_card'; readonly amount: number }
+  | { readonly kind: 'parley'; readonly targetId: string };
 
 /** 附着在一个战斗单位身上的持续效果。 */
 export interface Statuses {
@@ -259,8 +274,11 @@ export interface RunState {
    * Encounter 里的增删只发生在这里，不发生在 Encounter 状态上。
    */
   readonly deck: readonly CardInstance[];
-  /** 每个 Faction 对玩家的态度。#8 会把它改成由 Memory 推出的东西。 */
-  readonly standing: Readonly<Record<string, number>>;
+  /**
+   * 每个 Faction 记得的事。Standing 由它推出，不单独存——否则两者会漂移，
+   * 而玩家点开面板看到的正是这些条目。
+   */
+  readonly memories: Readonly<Record<string, readonly MemoryEntry[]>>;
   /** 正等着玩家挑的那份 Favor。 */
   readonly favor: FavorOffer | null;
   readonly phase: RunPhase;

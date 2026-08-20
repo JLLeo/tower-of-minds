@@ -325,3 +325,27 @@ button.primary:disabled {
   font-size: 13px;
   color: var(--accent);
 }
+
+.memories {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.memory summary {
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.memory p {
+  margin: 6px 0 0;
+  color: var(--dim);
+}

@@ -32,7 +32,11 @@ ${CARD_POOL_LINES}`;
  */
 function userPrompt(task: AgentTask): string {
   const persona = `你是${task.agent.name}。你的性格：${task.agent.persona}
-你的目标：${task.agent.goal}`;
+你的目标：${task.agent.goal}
+
+你对这个外来者的态度是 ${task.standing}（正数表示他帮过你们，负数表示他伤过你们）。
+你记得的事：
+${task.memory}`;
 
   switch (task.kind) {
     case 'intent': {

@@ -1,4 +1,5 @@
 import { legalTargetsFor } from '../engine/agents.js';
+import { memoryForPrompt, standingOf } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { AgentRequest, AgentState, CombatantState, RunState } from '../engine/types.js';
 
@@ -20,6 +21,9 @@ export type AgentTask = {
   readonly options: readonly ActionOption[];
   readonly allies: readonly string[];
   readonly rivals: readonly string[];
+  /** 这个 Faction 记得关于玩家的什么。它记得什么，就只知道什么。 */
+  readonly memory: string;
+  readonly standing: number;
   readonly turn: number;
   readonly playerHp: number;
   readonly playerMaxHp: number;
@@ -60,6 +64,8 @@ export function taskFor(state: RunState, request: AgentRequest): AgentTask | und
           description: action.description,
           targets: legalTargetsFor(state, combatant, action).map((id) => ({ id, name: nameOf(id) })),
         })),
+        memory: memoryForPrompt(state, combatant.factionId),
+        standing: standingOf(state, combatant.factionId),
         allies: state.encounter.combatants
           .filter((c) => c.hp > 0 && c.factionId === combatant.factionId && c.id !== combatant.id)
           .map((c) => `${c.name}（${c.hp}/${c.maxHp}）`),

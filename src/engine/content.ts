@@ -56,6 +56,7 @@ const RED_RING: readonly CardDefinition[] = [
   defineCard('onslaught', '狂攻', 'red-ring', ['strike', 'multi']),
   defineCard('searing', '灼心', 'red-ring', ['burn', 'expose']),
   defineCard('skewer', '穿刺连击', 'red-ring', ['pierce', 'multi']),
+  defineCard('accord', '递刀', 'red-ring', ['parley']),
 ];
 
 /** 青蔓：韧性与资源。 */
@@ -70,6 +71,7 @@ const GREEN_VINE: readonly CardDefinition[] = [
   defineCard('thornwall', '荆棘护盾', 'green-vine', ['guard', 'thorns']),
   defineCard('foresight', '深谋', 'green-vine', ['draw', 'surge']),
   defineCard('scavenge', '拾遗', 'green-vine', ['recall', 'draw']),
+  defineCard('truce', '止戈', 'green-vine', ['parley']),
 ];
 
 export const CARD_POOL: readonly CardDefinition[] = [...RED_RING, ...GREEN_VINE];
@@ -164,13 +166,17 @@ const ROSTER: readonly CombatantTemplate[] = [
  * 某一层的场面。两个 Faction 始终同场——它们之间也在打，玩家集火谁、放过谁本身
  * 就是表态。越往上血量越厚；真正的层间差异（不同的人、不同的过节）是 #10 的事。
  */
-export function combatantsForFloor(floor: number): readonly CombatantState[] {
-  const scale = 1 + 0.18 * (floor - 1);
-  return ROSTER.map((template) => {
-    const hp = Math.round(template.hp * scale);
+export function combatantsForFloor(
+  floor: number,
+  reinforced: readonly string[] = [],
+): readonly CombatantState[] {
+  const scale = 1 + 0.12 * (floor - 1);
+  const build = (template: CombatantTemplate, suffix = ''): CombatantState => {
+    // 增援是临时凑来的人手，比正规成员单薄。
+    const hp = Math.round(template.hp * scale * (suffix ? 0.55 : 1));
     return {
-      id: template.id,
-      name: template.name,
+      id: template.id + suffix,
+      name: template.name + (suffix ? '（增援）' : ''),
       factionId: template.factionId,
       hp,
       maxHp: hp,
@@ -179,7 +185,16 @@ export function combatantsForFloor(floor: number): readonly CombatantState[] {
       intent: null,
       statuses: NO_STATUSES,
     };
-  });
+  };
+
+  const field = ROSTER.map((template) => build(template));
+
+  // 被得罪的 Faction 多带一个人。这是「你得罪了它」看得见的后果。
+  for (const factionId of reinforced) {
+    const template = ROSTER.find((t) => t.factionId === factionId);
+    if (template) field.push(build(template, '-reinforcement'));
+  }
+  return field;
 }
 
 /** 每个 Faction 自己的 Base Card，Favor 从这里给。 */
