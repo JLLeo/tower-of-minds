@@ -28,7 +28,12 @@ const MAX_LINE_LENGTH = 40;
  * 为每个还没定下这一回合行动的 Combatant 挂出一个 intent 提问。
  *
  * 每个 Combatant 一个提问，即使同属一个 Faction——它们共享心智与记忆，但各自站在
- * 场上的不同位置，行动要分别决定。合并成一次调用是 ADR-0004 明确拒绝的事。
+ * 场上的不同位置，行动要分别决定。
+ *
+ * 注意这与 ADR-0004 的字面表述有张力：那条写的是「每个 Agent 每回合各自发起一次调用」，
+ * 而 ADR-0010 之后 Agent 是 Faction 级的，同派两个单位于是问了两次。ADR-0004 真正
+ * 禁止的是把**不同心智**合并成一个指挥官 prompt，这里没有那么做；但字面要不要跟着改，
+ * 是一个需要决定的问题，不该由这段注释悄悄定下来。
  */
 export function openIntentRequests(state: RunState, atMs: number): RunState {
   if (state.phase === 'ended') return state;
@@ -143,7 +148,8 @@ export function legalTargetsFor(
   combatant: CombatantState,
   action: CombatantAction,
 ): readonly string[] {
-  if (action.targeting === 'self') return [];
+  // 打谁由 kind 推出，不另存一个可能与它矛盾的字段：防御只作用于自己。
+  if (action.kind !== 'attack') return [];
   return [
     PLAYER_TARGET,
     ...state.encounter.combatants
@@ -203,7 +209,7 @@ export function fallbackIntent(combatant: CombatantState): Intent {
   // 玩家看得出来的、比回退更聪明的决定。
   return {
     actionId: action?.id ?? '',
-    targetId: action?.targeting === 'enemy' ? PLAYER_TARGET : null,
+    targetId: action?.kind === 'attack' ? PLAYER_TARGET : null,
     line: '',
     source: 'fallback',
   };

@@ -602,7 +602,7 @@ describe('Atom 效果', () => {
   function answerWith(state: RunState, actionId: string): RunState {
     const action = state.encounter.combatants[0]?.actions.find((a) => a.id === actionId);
     const payload =
-      action?.targeting === 'enemy'
+      action?.kind === 'attack'
         ? { actionId, targetId: PLAYER_TARGET, line: '' }
         : { actionId, line: '' };
     return onlyOneActs(state, 'tower-guard', payload);
@@ -898,6 +898,49 @@ describe('多方混战与站队', () => {
     expect(state.encounter.damageDealtTo['green-vine']).toBe(6);
     expect(state.encounter.damageDealtTo['red-ring']).toBeUndefined();
     // 打了青蔓，就是站在赤环那边
+    expect(favoredFaction(state)).toBe('red-ring');
+  });
+
+  it('灼烧造成的伤害也算进站队账本', () => {
+    // 否则玩家可以把一个 Faction 烧死，账本上却显示他偏袒的正是这一方
+    let state = fresh(deckOf('ignite'));
+    const card = state.encounter.player.hand[0]!;
+    state = applyInput(state, {
+      type: 'play_card',
+      instanceId: card.instanceId,
+      atMs: 100,
+      targetId: SCOUT,
+    });
+    expect(state.encounter.damageDealtTo['green-vine']).toBeUndefined(); // 打出时不掉血
+
+    state = applyInput(allDefend(state), { type: 'end_turn', atMs: 1000 });
+
+    expect(state.encounter.damageDealtTo['green-vine']).toBe(3);
+    expect(favoredFaction(state)).toBe('red-ring');
+  });
+
+  it('被打光的 Faction 不会被算作你偏袒的一方——它没人可以还这个人情', () => {
+    let state = fresh(deckOf('strike'));
+    // 把青蔓打光
+    for (let turn = 0; turn < 12 && state.phase === 'in_encounter'; turn++) {
+      state = allDefend(state);
+      while (state.encounter.phase === 'player_turn') {
+        const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
+        if (!card) break;
+        state = applyInput(state, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: SCOUT,
+        });
+      }
+      if (state.phase !== 'in_encounter') break;
+      state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+
+    expect(at(state, SCOUT).hp).toBe(0);
+    // 玩家一点都没打赤环，但偏袒的只能是还站着的那一方
+    expect(state.encounter.damageDealtTo['red-ring']).toBeUndefined();
     expect(favoredFaction(state)).toBe('red-ring');
   });
 

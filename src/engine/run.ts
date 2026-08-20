@@ -190,15 +190,22 @@ export function livingCombatants(state: RunState): readonly CombatantState[] {
   return state.encounter.combatants.filter((c) => c.hp > 0);
 }
 
+/** 玩家没有指定目标时打谁。渲染层读它来高亮，不自己再推一遍。 */
+export function defaultTarget(state: RunState): string | undefined {
+  return livingCombatants(state)[0]?.id;
+}
+
 /**
  * 你这一场偏袒了谁：在场的 Faction 里，你打得最少的那个。打得一样多就没有偏袒。
  * #7 的 Favor 与 #8 的 Standing 都从这里读。
  */
 export function favoredFaction(state: RunState): string | null {
-  const present = new Set(state.encounter.combatants.map((c) => c.factionId));
-  if (present.size < 2) return null;
+  // 只有还站着的 Faction 才能给你东西——被你打光的那一方没人可以还这个人情。
+  const alive = [...new Set(livingCombatants(state).map((c) => c.factionId))];
+  if (alive.length === 0) return null;
+  if (alive.length === 1) return alive[0] ?? null;
 
-  const scored = [...present]
+  const scored = alive
     .map((factionId) => ({ factionId, damage: state.encounter.damageDealtTo[factionId] ?? 0 }))
     .sort((a, b) => a.damage - b.damage);
 
@@ -389,10 +396,9 @@ function dealDamage(
   hits: number,
   ignoreBlock: boolean,
 ): RunState {
-  const target = state.encounter.combatants.find((c) => c.id === targetId);
-  if (!target) return state;
+  const before = state.encounter.combatants.find((c) => c.id === targetId)?.hp;
+  if (before === undefined) return state;
 
-  const before = target.hp;
   const next = withCombatant(state, targetId, (combatant) => {
     let current = combatant;
     for (let i = 0; i < hits; i++) {
@@ -403,17 +409,27 @@ function dealDamage(
   });
 
   const after = next.encounter.combatants.find((c) => c.id === targetId);
-  const dealt = before - (after?.hp ?? before);
-  if (dealt <= 0) return next;
+  return creditSiding(next, targetId, before - (after?.hp ?? before));
+}
 
-  // 站队就记在这里：玩家打谁打得多，就是站在谁的对面。
+/**
+ * 站队就记在这里：玩家打谁打得多，就是站在谁的对面。
+ *
+ * 灼烧这类延迟结算的伤害也要走这里——否则玩家可以把一个 Faction 烧死，账本上却
+ * 显示他偏袒的正是这一方。
+ */
+function creditSiding(state: RunState, targetId: string, dealt: number): RunState {
+  if (dealt <= 0) return state;
+  const target = state.encounter.combatants.find((c) => c.id === targetId);
+  if (!target) return state;
+
   return {
-    ...next,
+    ...state,
     encounter: {
-      ...next.encounter,
+      ...state.encounter,
       damageDealtTo: {
-        ...next.encounter.damageDealtTo,
-        [target.factionId]: (next.encounter.damageDealtTo[target.factionId] ?? 0) + dealt,
+        ...state.encounter.damageDealtTo,
+        [target.factionId]: (state.encounter.damageDealtTo[target.factionId] ?? 0) + dealt,
       },
     },
   };
@@ -516,9 +532,10 @@ function endTurn(state: RunState, atMs: number): RunState {
 
     // 虚弱先砍一半，这一刀无论打谁都一样。
     const raw = combatant.statuses.weakened ? Math.round(action.amount * 0.5) : action.amount;
-    let after: CombatantState = { ...acted, statuses: { ...acted.statuses, weakened: false } };
+    let after: CombatantState = acted;
 
     if (intent.targetId === PLAYER_TARGET) {
+      after = { ...after, statuses: { ...after.statuses, weakened: false } };
       const reduced = Math.max(0, raw - player.statuses.endure);
       const { block, dealt } = absorb(player.block, reduced);
       player = { ...player, block, hp: Math.max(0, player.hp - dealt) };
@@ -541,13 +558,15 @@ function endTurn(state: RunState, atMs: number): RunState {
       continue;
     }
     const before = target.hp;
-    combatants[targetIndex] = takeHit(target, raw, false);
+    combatants[i] = { ...after, statuses: { ...after.statuses, weakened: false } };
+    combatants[targetIndex] = takeHit(target, raw, false, false);
     journal.push(
       `${combatant.name}攻向${target.name}，造成 ${before - (combatants[targetIndex]?.hp ?? before)} 点伤害。`,
     );
   }
 
-  // 回合末结算灼烧。
+  // 回合末结算灼烧。灼烧是玩家打上去的，所以它造成的伤害也要记进站队账本。
+  const burned: { factionId: string; dealt: number }[] = [];
   for (let i = 0; i < combatants.length; i++) {
     const combatant = combatants[i];
     if (!combatant || combatant.hp <= 0) continue;
@@ -555,16 +574,31 @@ function endTurn(state: RunState, atMs: number): RunState {
     if (burn <= 0 || burnTurns <= 0) continue;
 
     const remaining = burnTurns - 1;
+    const before = combatant.hp;
     combatants[i] = {
       ...combatant,
       hp: Math.max(0, combatant.hp - burn),
       statuses: { ...combatant.statuses, burnTurns: remaining, burn: remaining > 0 ? burn : 0 },
     };
+    burned.push({ factionId: combatant.factionId, dealt: before - (combatants[i]?.hp ?? before) });
     journal.push(`${combatant.name}被灼烧，受到 ${burn} 点伤害。`);
   }
 
+  let damageDealtTo = encounter.damageDealtTo;
+  for (const entry of burned) {
+    if (entry.dealt <= 0) continue;
+    damageDealtTo = {
+      ...damageDealtTo,
+      [entry.factionId]: (damageDealtTo[entry.factionId] ?? 0) + entry.dealt,
+    };
+  }
+
   const afterCombatants = checkOutcome(
-    dropRequests({ ...state, journal, encounter: { ...encounter, player, combatants } }),
+    dropRequests({
+      ...state,
+      journal,
+      encounter: { ...encounter, player, combatants, damageDealtTo },
+    }),
   );
   if (afterCombatants.phase === 'ended') return afterCombatants;
 

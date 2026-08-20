@@ -3,13 +3,12 @@ import {
   GRADE_LABEL,
   PERFECT_BAND,
   canPlay,
+  defaultTarget,
   definitionOf,
   intendedAction,
   isPlayerActing,
 } from '../engine/run.js';
-import { pendingRequestFor } from '../engine/agents.js';
 import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
-import { livingCombatants } from '../engine/run.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
@@ -123,13 +122,9 @@ function combatantsView(state: RunState, view: View): HTMLElement {
         card.appendChild(el('div', 'combatant-next', `意图：${at}${action.description}`));
         const line = combatant.intent?.line;
         if (line) card.appendChild(el('div', 'combatant-line', `「${line}」`));
-      } else if (
-        pendingRequestFor(state, 'intent', combatant.factionId) !== undefined &&
-        state.encounter.phase !== 'awaiting_execution'
-      ) {
-        // 玩家正在做 Execution Check 时不显示这行：等待要被玩法盖住，不是摆在脸上。
-        card.appendChild(el('div', 'combatant-next combatant-thinking', '正在盘算…'));
       }
+      // 刻意什么都不显示：Intent 还没到就先空着，等它到了自己出现。
+      // 玩家从不因为模型而被挡住，所以界面上也不该有「AI 思考中」这种东西。
     }
     section.appendChild(card);
   }
@@ -155,12 +150,10 @@ function describe(definition: CardDefinition): string {
   return parts.filter((part) => part.length > 0).join('；');
 }
 
-/** 玩家这一刻打出去会打到谁：选中的那个，选中的死了就顺延到第一个还活着的。 */
+/** 玩家这一刻打出去会打到谁：选中的那个，选中的死了就退回引擎的默认目标。 */
 function effectiveTarget(state: RunState, view: View): string | undefined {
-  const chosen = state.encounter.combatants.find(
-    (c) => c.id === view.selectedTargetId && c.hp > 0,
-  );
-  return (chosen ?? livingCombatants(state)[0])?.id;
+  const chosen = state.encounter.combatants.find((c) => c.id === view.selectedTargetId && c.hp > 0);
+  return chosen?.id ?? defaultTarget(state);
 }
 
 function factionNameOf(state: RunState, factionId: string): string {

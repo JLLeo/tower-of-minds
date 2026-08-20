@@ -45,8 +45,6 @@ export interface CombatantAction {
   readonly id: string;
   readonly kind: 'attack' | 'defend';
   readonly amount: number;
-  /** 打谁：敌对目标，还是自己。合法目标由引擎按这个算出来。 */
-  readonly targeting: 'enemy' | 'self';
   /** 给模型和玩家看的说明。引擎结算只认 kind 和 amount，不解析这段文字。 */
   readonly description: string;
 }
