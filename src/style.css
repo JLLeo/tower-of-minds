@@ -304,3 +304,18 @@ button.primary:disabled {
   margin-left: 8px;
   font-weight: normal;
 }
+
+.favor {
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.favor h2 {
+  margin: 0;
+  font-size: 16px;
+}

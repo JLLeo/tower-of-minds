@@ -3,6 +3,7 @@ import {
   NO_STATUSES,
   type AgentState,
   type CardDefinition,
+  type CombatantAction,
   type CardType,
   type CombatantState,
   type ExecutionSpec,
@@ -112,59 +113,82 @@ export function builtInAgents(): readonly AgentState[] {
   ];
 }
 
-/**
- * 第 1 层的场面。两个 Faction 同场，它们之间也在打——玩家集火谁、放过谁，
- * 本身就是表态。这不是「玩家对一队敌人」。
- */
-export function floorOneCombatants(): readonly CombatantState[] {
-  return [
-    {
-      id: 'tower-guard',
-      name: '塔卫',
-      factionId: 'red-ring',
-      hp: 34,
-      maxHp: 34,
-      block: 0,
-      actions: [
-        { id: 'slash', kind: 'attack', amount: 7, description: '挥刀劈砍，造成 7 点伤害' },
-        { id: 'crush', kind: 'attack', amount: 11, description: '沉重的下劈，造成 11 点伤害' },
-        { id: 'brace', kind: 'defend', amount: 5, description: '举盾自守，获得 5 点格挡' },
-      ],
-      intent: null,
-      statuses: NO_STATUSES,
-    },
-    {
-      id: 'red-archer',
-      name: '赤环弓手',
-      factionId: 'red-ring',
-      hp: 22,
-      maxHp: 22,
-      block: 0,
-      actions: [
-        { id: 'loose', kind: 'attack', amount: 5, description: '放箭，造成 5 点伤害' },
-        { id: 'volley', kind: 'attack', amount: 8, description: '压制射击，造成 8 点伤害' },
-        { id: 'retreat', kind: 'defend', amount: 4, description: '后撤半步，获得 4 点格挡' },
-      ],
-      intent: null,
-      statuses: NO_STATUSES,
-    },
-    {
-      id: 'vine-scout',
-      name: '青蔓斥候',
-      factionId: 'green-vine',
-      hp: 26,
-      maxHp: 26,
-      block: 0,
-      actions: [
-        { id: 'lash', kind: 'attack', amount: 6, description: '藤鞭抽击，造成 6 点伤害' },
-        { id: 'snare', kind: 'attack', amount: 9, description: '缠住对手狠抽，造成 9 点伤害' },
-        { id: 'coil', kind: 'defend', amount: 6, description: '蜷起藤甲，获得 6 点格挡' },
-      ],
-      intent: null,
-      statuses: NO_STATUSES,
-    },
-  ];
+/** 一个 Run 有几个普通 Floor。Boss 层是 #9。 */
+export const NORMAL_FLOORS = 5;
+
+interface CombatantTemplate {
+  readonly id: string;
+  readonly name: string;
+  readonly factionId: string;
+  readonly hp: number;
+  readonly actions: readonly CombatantAction[];
 }
+
+const ROSTER: readonly CombatantTemplate[] = [
+  {
+    id: 'tower-guard',
+    name: '塔卫',
+    factionId: 'red-ring',
+    hp: 34,
+    actions: [
+      { id: 'slash', kind: 'attack', amount: 7, description: '挥刀劈砍，造成 7 点伤害' },
+      { id: 'crush', kind: 'attack', amount: 11, description: '沉重的下劈，造成 11 点伤害' },
+      { id: 'brace', kind: 'defend', amount: 5, description: '举盾自守，获得 5 点格挡' },
+    ],
+  },
+  {
+    id: 'red-archer',
+    name: '赤环弓手',
+    factionId: 'red-ring',
+    hp: 22,
+    actions: [
+      { id: 'loose', kind: 'attack', amount: 5, description: '放箭，造成 5 点伤害' },
+      { id: 'volley', kind: 'attack', amount: 8, description: '压制射击，造成 8 点伤害' },
+      { id: 'retreat', kind: 'defend', amount: 4, description: '后撤半步，获得 4 点格挡' },
+    ],
+  },
+  {
+    id: 'vine-scout',
+    name: '青蔓斥候',
+    factionId: 'green-vine',
+    hp: 26,
+    actions: [
+      { id: 'lash', kind: 'attack', amount: 6, description: '藤鞭抽击，造成 6 点伤害' },
+      { id: 'snare', kind: 'attack', amount: 9, description: '缠住对手狠抽，造成 9 点伤害' },
+      { id: 'coil', kind: 'defend', amount: 6, description: '蜷起藤甲，获得 6 点格挡' },
+    ],
+  },
+];
+
+/**
+ * 某一层的场面。两个 Faction 始终同场——它们之间也在打，玩家集火谁、放过谁本身
+ * 就是表态。越往上血量越厚；真正的层间差异（不同的人、不同的过节）是 #10 的事。
+ */
+export function combatantsForFloor(floor: number): readonly CombatantState[] {
+  const scale = 1 + 0.18 * (floor - 1);
+  return ROSTER.map((template) => {
+    const hp = Math.round(template.hp * scale);
+    return {
+      id: template.id,
+      name: template.name,
+      factionId: template.factionId,
+      hp,
+      maxHp: hp,
+      block: 0,
+      actions: template.actions,
+      intent: null,
+      statuses: NO_STATUSES,
+    };
+  });
+}
+
+/** 每个 Faction 自己的 Base Card，Favor 从这里给。 */
+export function baseCardsOf(factionId: string): readonly CardDefinition[] {
+  return CARD_POOL.filter((card) => card.faction === factionId);
+}
+
+/** 跨过这个阈值的 Faction 提供高阶 Favor。同向站队两次。 */
+export const HIGH_FAVOR_THRESHOLD = 2;
 
 /** 一次 IntentRequest 允许等待多久。实测中位延迟约 1 秒，这里留足余量。 */
 export const INTENT_TIMEOUT_MS = 2500;

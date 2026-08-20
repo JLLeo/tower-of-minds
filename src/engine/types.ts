@@ -222,7 +222,21 @@ export interface EncounterState {
   readonly lastGrade: ExecutionGrade | null;
 }
 
-export type RunPhase = 'in_encounter' | 'ended';
+/**
+ * Favor：一场 Encounter 之后，你偏袒过的那个 Faction 给你的报酬。
+ *
+ * 阶位由 Standing 决定（#8 会把 Standing 做成由 Memory 推出的东西；本票先用
+ * 「你偏袒过它几次」这个最朴素的计数）。高阶 Favor 给的应该是一次 Fusion 机会
+ * 而不是一张牌——那是 #13。
+ */
+export interface FavorOffer {
+  readonly factionId: string;
+  readonly tier: 'basic' | 'high';
+  /** 可选的 Card。数量取决于这一方还有几个人活着——你保得越好，它给得越大方。 */
+  readonly choices: readonly string[];
+}
+
+export type RunPhase = 'in_encounter' | 'choosing_favor' | 'ended';
 export type RunOutcome = 'victory' | 'defeat';
 
 export interface RunState {
@@ -238,6 +252,15 @@ export interface RunState {
   /** 提问编号，单调递增。它保证 requestId 不会因为同一毫秒发生两次提问而撞车。 */
   readonly nextRequestSeq: number;
   readonly floor: number;
+  /**
+   * 玩家这一 Run 的 Deck，跨 Floor 累积。每场 Encounter 把它洗进抽牌堆；
+   * Encounter 里的增删只发生在这里，不发生在 Encounter 状态上。
+   */
+  readonly deck: readonly CardInstance[];
+  /** 每个 Faction 对玩家的态度。#8 会把它改成由 Memory 推出的东西。 */
+  readonly standing: Readonly<Record<string, number>>;
+  /** 正等着玩家挑的那份 Favor。 */
+  readonly favor: FavorOffer | null;
   readonly phase: RunPhase;
   readonly encounter: EncounterState;
   readonly outcome: RunOutcome | null;
@@ -266,6 +289,8 @@ export type PlayerInput =
    * 会被引擎丢掉——否则它会顶掉一次它没看过的局面下的决定。
    */
   | { readonly type: 'agent_response'; readonly requestId: string; readonly payload: unknown }
+  /** 从 Favor 提供的选项里挑一张牌，然后上一层。 */
+  | { readonly type: 'choose_favor'; readonly cardId: string | null; readonly atMs: number }
   | { readonly type: 'execution_input'; readonly atMs: number }
   /**
    * 时间的流逝。UI 每帧上报当前时刻，引擎据此判断判定窗口是否已经耗尽——

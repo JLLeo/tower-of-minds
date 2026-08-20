@@ -36,7 +36,8 @@ const MAX_LINE_LENGTH = 40;
  * 是一个需要决定的问题，不该由这段注释悄悄定下来。
  */
 export function openIntentRequests(state: RunState, atMs: number): RunState {
-  if (state.phase === 'ended') return state;
+  // 只有正在打的时候才问。层间选 Favor 时挂出的提问永远等不到人回答。
+  if (state.phase !== 'in_encounter') return state;
 
   const pending = new Set(
     state.agentRequests.filter((r) => r.kind === 'intent').map((r) => r.combatantId),

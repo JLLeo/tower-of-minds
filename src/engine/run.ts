@@ -11,11 +11,14 @@ import { PLAYER_TARGET } from './types.js';
 import {
   CARD_POOL,
   HAND_SIZE,
+  HIGH_FAVOR_THRESHOLD,
   MAX_ENERGY,
+  NORMAL_FLOORS,
   PLAYER_MAX_HP,
   STARTING_DECK,
+  baseCardsOf,
   builtInAgents,
-  floorOneCombatants,
+  combatantsForFloor,
 } from './content.js';
 import { NO_STATUSES } from './types.js';
 import type {
@@ -28,6 +31,7 @@ import type {
   EncounterState,
   ExecutionGrade,
   ExecutionSpec,
+  FavorOffer,
   Generation,
   PlayerInput,
   PlayerState,
@@ -54,9 +58,55 @@ export function startRun(
     definitionId: id,
   }));
 
-  const [rngAfterShuffle, drawPile] = shuffle(createRng(seed), deck);
-  const fresh: PlayerState = {
+  const seeded: RunState = {
+    seed,
+    rng: createRng(seed),
+    agents: builtInAgents(),
+    agentRequests: [],
+    nextRequestSeq: 0,
+    floor: 0,
+    deck,
+    standing: {},
+    favor: null,
+    phase: 'in_encounter',
+    encounter: EMPTY_ENCOUNTER,
+    outcome: null,
+    journal: [`进入${generation.title}。`],
+  };
+
+  return beginEncounter(seeded, 1, PLAYER_MAX_HP, startedAtMs);
+}
+
+/** 还没有 Encounter 时的占位。startRun 立刻会用真正的第一层覆盖它。 */
+const EMPTY_ENCOUNTER: EncounterState = {
+  turn: 0,
+  phase: 'ended',
+  player: {
     hp: PLAYER_MAX_HP,
+    maxHp: PLAYER_MAX_HP,
+    block: 0,
+    energy: 0,
+    maxEnergy: MAX_ENERGY,
+    hand: [],
+    drawPile: [],
+    discardPile: [],
+    statuses: NO_STATUSES,
+  },
+  combatants: [],
+  pending: null,
+  damageDealtTo: {},
+  executionUsedThisTurn: false,
+  lastGrade: null,
+};
+
+/**
+ * 开一层。Deck 是 Run 级的资产，这里把它整副洗进抽牌堆——所以上一层拿到的牌
+ * 从下一层第一回合起就在牌堆里。
+ */
+function beginEncounter(state: RunState, floor: number, hp: number, atMs: number): RunState {
+  const [rngAfterShuffle, drawPile] = shuffle(state.rng, state.deck);
+  const fresh: PlayerState = {
+    hp,
     maxHp: PLAYER_MAX_HP,
     block: 0,
     energy: MAX_ENERGY,
@@ -68,36 +118,33 @@ export function startRun(
   };
   const [rng, player] = draw(rngAfterShuffle, fresh, HAND_SIZE);
 
-  const encounter: EncounterState = {
-    turn: 1,
-    phase: 'player_turn',
-    player,
-    combatants: floorOneCombatants(),
-    pending: null,
-    damageDealtTo: {},
-    executionUsedThisTurn: false,
-    lastGrade: null,
-  };
-
   return openIntentRequests(
     {
-      seed,
+      ...state,
       rng,
-      agents: builtInAgents(),
-      agentRequests: [],
-      nextRequestSeq: 0,
-      floor: 1,
+      floor,
+      favor: null,
       phase: 'in_encounter',
-      encounter,
-      outcome: null,
-      journal: [`进入${generation.title}的第 1 层。`],
+      journal: [...state.journal, `第 ${floor} 层。`],
+      encounter: {
+        turn: 1,
+        phase: 'player_turn',
+        player,
+        combatants: combatantsForFloor(floor),
+        pending: null,
+        damageDealtTo: {},
+        executionUsedThisTurn: false,
+        lastGrade: null,
+      },
     },
-    startedAtMs,
+    atMs,
   );
 }
 
 export function applyInput(state: RunState, input: PlayerInput): RunState {
   if (state.phase === 'ended') return state;
+  // 选 Favor 的时候，除了选 Favor 什么都做不了。
+  if (state.phase === 'choosing_favor' && input.type !== 'choose_favor') return state;
 
   switch (input.type) {
     case 'play_card':
@@ -108,6 +155,8 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
       return resolvePending(state, input.atMs);
     case 'agent_response':
       return receiveResponse(state, input.requestId, input.payload);
+    case 'choose_favor':
+      return takeFavor(state, input.cardId, input.atMs);
     case 'tick':
       return expireRequests(expireIfWindowClosed(state, input.atMs), input.atMs);
   }
@@ -600,7 +649,9 @@ function endTurn(state: RunState, atMs: number): RunState {
       encounter: { ...encounter, player, combatants, damageDealtTo },
     }),
   );
-  if (afterCombatants.phase === 'ended') return afterCombatants;
+  // 这一层可能刚刚被清掉（phase 变成 choosing_favor）——那就不该再抽牌、也不该
+  // 再挂提问，否则会在层间界面上开出永远无人回答的问题。
+  if (afterCombatants.phase !== 'in_encounter') return afterCombatants;
 
   const [rng, refreshed] = draw(
     afterCombatants.rng,
@@ -676,18 +727,109 @@ function checkOutcome(state: RunState): RunState {
   const factions = new Set(living.map((combatant) => combatant.factionId));
   if (factions.size <= 1) {
     const survivor = living[0];
-    return {
+    return clearFloor({
       ...state,
-      phase: 'ended',
-      outcome: 'victory',
       agentRequests: [],
       encounter: { ...encounter, phase: 'ended', pending: null },
       journal: [
         ...state.journal,
         survivor ? `场上只剩下${survivor.name}这一方，它放你过去。` : '这一层清空了。',
       ],
-    };
+    });
   }
 
   return state;
+}
+
+// ---------------------------------------------------------------- 层间
+
+/**
+ * 一层清完了。最后一层之后 Run 就结束（Boss 层是 #9）；否则停下来让玩家收 Favor。
+ *
+ * 这里不直接开下一层：开新层需要一个时刻，而时刻只能从 input 进引擎。玩家的
+ * choose_favor 会带着它进来。
+ */
+function clearFloor(state: RunState): RunState {
+  if (state.floor >= NORMAL_FLOORS) {
+    return {
+      ...state,
+      phase: 'ended',
+      outcome: 'victory',
+      journal: [...state.journal, '你走到了塔的尽头。'],
+    };
+  }
+
+  const offer = buildFavor(state);
+  const standing = offer.factionId
+    ? { ...state.standing, [offer.factionId]: (state.standing[offer.factionId] ?? 0) + 1 }
+    : state.standing;
+
+  const agentName = state.agents.find((a) => a.factionId === offer.factionId)?.name;
+  return {
+    ...state,
+    phase: 'choosing_favor',
+    favor: offer,
+    standing,
+    journal: [
+      ...state.journal,
+      agentName ? `${agentName}记下了你这一场的选择。` : '没有哪一方觉得欠你人情。',
+    ],
+  };
+}
+
+/**
+ * 这一层的报酬。给的人是你偏袒过的那一方；给多少取决于它还剩几个人——
+ * 你保得越好，它给得越大方。打成平手就没有人欠你人情。
+ */
+function buildFavor(state: RunState): FavorOffer {
+  const factionId = favoredFaction(state);
+  if (!factionId) return { factionId: '', tier: 'basic', choices: [] };
+
+  const survivors = state.encounter.combatants.filter(
+    (c) => c.hp > 0 && c.factionId === factionId,
+  ).length;
+  const count = Math.min(3, Math.max(1, survivors));
+
+  const pool = baseCardsOf(factionId).map((card) => card.id);
+  const [, shuffled] = shuffle(state.rng, pool);
+  const tier =
+    (state.standing[factionId] ?? 0) + 1 >= HIGH_FAVOR_THRESHOLD ? 'high' : 'basic';
+
+  // 高阶 Favor 本该给的是一次 Fusion 机会而不是一张牌——那是 #13。
+  return { factionId, tier, choices: shuffled.slice(0, count) };
+}
+
+/**
+ * 欠你人情的那一方会替你包扎。恢复量按 Favor 的阶位给。
+ *
+ * 这块是实现时被逼出来的：HP 跨 Floor 保留、对手血量逐层放大，而全程没有任何恢复，
+ * 五层的 Run 在数学上赢不了。与其塞一个通用回血，不如把恢复接在站队上——谁欠你人情，
+ * 谁替你处理伤口；打成平手就没人管你。数值需要靠试玩调。
+ */
+const FAVOR_HEAL: Readonly<Record<FavorOffer['tier'], number>> = { basic: 6, high: 10 };
+
+/** 收下（或放弃）这一层的报酬，然后上一层。 */
+function takeFavor(state: RunState, cardId: string | null, atMs: number): RunState {
+  if (state.phase !== 'choosing_favor') return state;
+  const offer = state.favor;
+  if (!offer) return state;
+  if (cardId !== null && !offer.choices.includes(cardId)) return state;
+
+  const deck = cardId
+    ? [...state.deck, { instanceId: `${cardId}#${state.deck.length}`, definitionId: cardId }]
+    : state.deck;
+  const journal = [...state.journal];
+  if (cardId) {
+    journal.push(`你收下了「${CARD_POOL.find((c) => c.id === cardId)?.name ?? cardId}」。`);
+  }
+
+  const player = state.encounter.player;
+  const heal = offer.factionId ? FAVOR_HEAL[offer.tier] : 0;
+  const healed = Math.min(player.maxHp, player.hp + heal);
+  if (healed > player.hp) {
+    const who = state.agents.find((a) => a.factionId === offer.factionId)?.name ?? '有人';
+    journal.push(`${who}替你处理了伤口，恢复 ${healed - player.hp} 点生命。`);
+  }
+
+  return beginEncounter({ ...state, deck, journal }, state.floor + 1, healed, atMs);
 }

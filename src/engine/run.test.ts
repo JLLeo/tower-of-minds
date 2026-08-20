@@ -36,14 +36,62 @@ function scriptInputs(start: RunState, maxSteps = 500): PlayerInput[] {
   let state = start;
   const inputs: PlayerInput[] = [];
 
-  for (let i = 0; i < maxSteps && state.phase === 'in_encounter'; i++) {
+  for (let i = 0; i < maxSteps && state.phase !== 'ended'; i++) {
+    // 场上有敌对派系就先打对方——这是实测到的真实模型行为，而不是回退那种
+    // 「所有人都打玩家」的最坏情况。不这么做，测的就不是这个游戏。
+    if (state.agentRequests.length > 0) {
+      for (const request of state.agentRequests) {
+        const me = state.encounter.combatants.find((c) => c.id === request.combatantId);
+        const rival = state.encounter.combatants.find(
+          (c) => c.hp > 0 && me !== undefined && c.factionId !== me.factionId,
+        );
+        const attack = me?.actions.find((a) => a.kind === 'attack');
+        const payload = attack
+          ? { actionId: attack.id, targetId: rival && state.encounter.turn % 2 === 0 ? rival.id : PLAYER_TARGET, line: '' }
+          : { actionId: me?.actions[0]?.id ?? '' };
+        const answer: PlayerInput = {
+          type: 'agent_response',
+          requestId: request.id,
+          payload,
+        };
+        inputs.push(answer);
+        state = applyInput(state, answer);
+      }
+      continue;
+    }
+
     let input: PlayerInput;
-    if (state.encounter.phase === 'awaiting_execution') {
+    if (state.phase === 'choosing_favor') {
+      // 层间：收下第一个选项，上一层
+      input = {
+        type: 'choose_favor',
+        cardId: state.favor?.choices[0] ?? null,
+        atMs: at(),
+      };
+    } else if (state.encounter.phase === 'awaiting_execution') {
       input = pressAt(state, 0.75);
     } else {
-      const playable = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-      input = playable
-        ? { type: 'play_card', instanceId: playable.instanceId, atMs: at() }
+      // 一个还算像样的玩家：挑最快能清掉的那个 Faction 集火，血少了先找护体牌。
+      const byFaction = new Map<string, number>();
+      for (const c of state.encounter.combatants) {
+        if (c.hp <= 0) continue;
+        byFaction.set(c.factionId, (byFaction.get(c.factionId) ?? 0) + c.hp);
+      }
+      const weakest = [...byFaction.entries()].sort((a, b) => a[1] - b[1])[0]?.[0];
+      const focus = state.encounter.combatants.find((c) => c.hp > 0 && c.factionId === weakest);
+
+      const hurt = state.encounter.player.hp * 2 < state.encounter.player.maxHp;
+      const hand = state.encounter.player.hand.filter((c) => canPlay(state, c.instanceId));
+      const preferred = hurt
+        ? (hand.find((c) => definitionOf(state, c.instanceId)?.type === 'shield') ?? hand[0])
+        : hand[0];
+      input = preferred
+        ? {
+            type: 'play_card',
+            instanceId: preferred.instanceId,
+            atMs: at(),
+            ...(focus ? { targetId: focus.id } : {}),
+          }
         : { type: 'end_turn', atMs: at() };
     }
     inputs.push(input);
@@ -360,9 +408,12 @@ describe('完整一场', () => {
     expect(state.phase).toBe('ended');
     expect(state.outcome).toBe('victory');
     expect(state.encounter.player.hp).toBeGreaterThan(0);
+    expect(state.floor).toBe(5); // 五层都过了
     // 不需要清场：只要场上不再有两个敌对 Faction，剩下的那一方就放你过去
     const living = state.encounter.combatants.filter((c) => c.hp > 0);
     expect(new Set(living.map((c) => c.factionId)).size).toBeLessThanOrEqual(1);
+    // Deck 跨层累积：起始 10 张，每层收一张
+    expect(state.deck.length).toBeGreaterThan(10);
   });
 
   it('同一 seed 加同一串输入必然得到同一个 Run', () => {
@@ -834,6 +885,7 @@ describe('多方混战与站队', () => {
   const at = (state: RunState, id: string): CombatantState =>
     state.encounter.combatants.find((c) => c.id === id)!;
 
+
   function fresh(options?: RunOptions): RunState {
     return startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
   }
@@ -981,12 +1033,120 @@ describe('多方混战与站队', () => {
       state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
     }
 
-    expect(state.phase).toBe('ended');
-    expect(state.outcome).toBe('victory');
+    // 清完这一层就停下来收人情，而不是直接结束 Run
+    expect(state.phase).toBe('choosing_favor');
     // 赤环两人还站着——他们放你过去
     expect(at(state, GUARD).hp).toBeGreaterThan(0);
     expect(at(state, ARCHER).hp).toBeGreaterThan(0);
     expect(at(state, SCOUT).hp).toBe(0);
     expect(favoredFaction(state)).toBe('red-ring');
+  });
+});
+
+describe('多 Floor 推进与 Favor', () => {
+  const SCOUT = 'vine-scout';
+
+  function clearFloorOne(state: RunState): RunState {
+    // 只打青蔓斥候，把它清掉；赤环两人一直自守
+    let next = state;
+    for (let turn = 0; turn < 14 && next.phase === 'in_encounter'; turn++) {
+      next = allDefend(next);
+      while (next.encounter.phase === 'player_turn') {
+        const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
+        if (!card) break;
+        next = applyInput(next, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: SCOUT,
+        });
+      }
+      if (next.phase !== 'in_encounter') break;
+      next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+    return next;
+  }
+
+  it('清完一层不会直接结束 Run，而是停下来收人情', () => {
+    const state = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+
+    expect(state.phase).toBe('choosing_favor');
+    expect(state.outcome).toBeNull();
+    expect(state.favor?.factionId).toBe('red-ring');
+    expect(state.favor?.choices.length).toBeGreaterThan(0);
+    // 给你牌的是赤环，所以选项来自赤环的 Base Card
+    for (const cardId of state.favor!.choices) {
+      expect(CARD_POOL.find((c) => c.id === cardId)?.faction).toBe('red-ring');
+    }
+  });
+
+  it('收下 Favor 会进 Deck，并在下一层第一回合就可能摸到', () => {
+    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const picked = cleared.favor!.choices[0]!;
+    const deckBefore = cleared.deck.length;
+
+    const next = applyInput(cleared, { type: 'choose_favor', cardId: picked, atMs: 20_000 });
+
+    expect(next.phase).toBe('in_encounter');
+    expect(next.floor).toBe(2);
+    expect(next.deck).toHaveLength(deckBefore + 1);
+    expect(next.deck.some((c) => c.definitionId === picked)).toBe(true);
+    // Deck 整副洗进这一层的抽牌堆
+    const inPlay =
+      next.encounter.player.hand.length +
+      next.encounter.player.drawPile.length +
+      next.encounter.player.discardPile.length;
+    expect(inPlay).toBe(next.deck.length);
+  });
+
+  it('可以什么都不要', () => {
+    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const next = applyInput(cleared, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+
+    expect(next.floor).toBe(2);
+    expect(next.deck).toHaveLength(cleared.deck.length);
+  });
+
+  it('不在选项里的牌拿不走', () => {
+    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    expect(
+      applyInput(cleared, { type: 'choose_favor', cardId: 'skewer-not-offered', atMs: 20_000 }),
+    ).toBe(cleared);
+  });
+
+  it('选 Favor 的时候别的输入都不生效', () => {
+    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    expect(applyInput(cleared, { type: 'end_turn', atMs: 20_000 })).toBe(cleared);
+    expect(applyInput(cleared, { type: 'tick', atMs: 99_999 })).toBe(cleared);
+  });
+
+  it('同向站队两次就跨过阈值，Favor 升到高阶', () => {
+    let state = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    expect(state.favor?.tier).toBe('basic');
+    expect(state.standing['red-ring']).toBe(1);
+
+    state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+    state = clearFloorOne(state);
+
+    expect(state.standing['red-ring']).toBe(2);
+    expect(state.favor?.tier).toBe('high');
+  });
+
+  it('欠你人情的那一方会替你包扎', () => {
+    // 先挨一刀，否则满血无从谈起恢复
+    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('strike'));
+    state = onlyOneActs(state, 'tower-guard', {
+      actionId: 'slash',
+      targetId: PLAYER_TARGET,
+      line: '',
+    });
+    state = applyInput(state, { type: 'end_turn', atMs: 500 });
+
+    const cleared = clearFloorOne(state);
+    const hurt = cleared.encounter.player.hp;
+    expect(hurt).toBeLessThan(cleared.encounter.player.maxHp);
+
+    const next = applyInput(cleared, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+    expect(next.encounter.player.hp).toBeGreaterThan(hurt);
   });
 });

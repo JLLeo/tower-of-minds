@@ -9,6 +9,7 @@ import {
   isPlayerActing,
 } from '../engine/run.js';
 import { atomGlyphs, describeAtoms } from '../engine/atoms.js';
+import { CARD_POOL, NORMAL_FLOORS } from '../engine/content.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
 
@@ -46,6 +47,7 @@ export function render(
     handView(state, view, dispatch),
     controls(state, dispatch),
     journalView(state),
+    ...(state.phase === 'choosing_favor' ? [favorView(state, dispatch)] : []),
     ...(state.phase === 'ended' ? [outcomeView(state, restart)] : []),
   );
 
@@ -67,11 +69,57 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 }
 
 function header(state: RunState): HTMLElement {
+  const standing = Object.entries(state.standing)
+    .map(([factionId, value]) => `${factionNameOf(state, factionId)} ${value}`)
+    .join(' · ');
   return el(
     'header',
     'header',
-    `Tower of Minds — 第 ${state.floor} 层 · 回合 ${state.encounter.turn}`,
+    `Tower of Minds — 第 ${state.floor}/${NORMAL_FLOORS} 层 · 回合 ${state.encounter.turn}` +
+      (standing ? `　|　人情：${standing}` : ''),
   );
+}
+
+/** 层间的报酬：由你偏袒过的那一方给，选一张进 Deck，也可以不要。 */
+function favorView(state: RunState, dispatch: Dispatch): HTMLElement {
+  const offer = state.favor;
+  const section = el('section', 'favor');
+  if (!offer) return section;
+
+  if (!offer.factionId) {
+    section.appendChild(el('h2', undefined, '没有哪一方觉得欠你人情'));
+  } else {
+    const who = factionNameOf(state, offer.factionId);
+    section.appendChild(
+      el('h2', undefined, offer.tier === 'high' ? `${who}欠你一个大人情` : `${who}记下了这一场`),
+    );
+  }
+
+  const row = el('div', 'hand');
+  for (const cardId of offer.choices) {
+    const definition = CARD_POOL.find((card) => card.id === cardId);
+    if (!definition) continue;
+    const button = document.createElement('button');
+    button.className = `card card-${definition.type}`;
+    button.appendChild(el('span', 'card-cost', String(definition.cost)));
+    button.appendChild(el('span', 'card-name', definition.name));
+    button.appendChild(el('span', 'card-atoms', atomGlyphs(definition.atoms)));
+    button.appendChild(el('span', 'card-text', describeAtoms(definition.atoms)));
+    button.addEventListener('click', () =>
+      dispatch({ type: 'choose_favor', cardId, atMs: performance.now() }),
+    );
+    row.appendChild(button);
+  }
+  section.appendChild(row);
+
+  const skip = document.createElement('button');
+  skip.className = 'primary';
+  skip.textContent = offer.choices.length > 0 ? '什么都不要，上一层' : '上一层';
+  skip.addEventListener('click', () =>
+    dispatch({ type: 'choose_favor', cardId: null, atMs: performance.now() }),
+  );
+  section.appendChild(skip);
+  return section;
 }
 
 function meter(label: string, value: number, max: number, className: string): HTMLElement {
