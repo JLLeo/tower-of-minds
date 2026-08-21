@@ -1,7 +1,5 @@
 import {
-  GOOD_BAND,
   GRADE_LABEL,
-  PERFECT_BAND,
   canPlay,
   cardById,
   currentSiding,
@@ -21,7 +19,14 @@ import {
 } from '../engine/unlocks.js';
 import { describeMemory, summarizeMemory } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
-import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
+import type {
+  CardDefinition,
+  ExecutionKind,
+  ExecutionSpec,
+  PendingExecution,
+  PlayerInput,
+  RunState,
+} from '../engine/types.js';
 
 export type Dispatch = (input: PlayerInput) => void;
 
@@ -435,17 +440,37 @@ function zone(band: { readonly start: number; readonly end: number }, className:
   return node;
 }
 
+/** 三种原型各自的提示语。手感不同，说法就得不同——这是玩家认出类别的第一条线索。 */
+const EXECUTION_HINT: Record<ExecutionKind, string> = {
+  block: '按 空格 定格',
+  rhythm: '跟着拍子，按 空格 连打三下',
+  charge: '按 空格 起手，撑住，快到头再按一下',
+};
+
 /**
- * 时机条：轨道代表整个判定窗口，高亮区是 Perfect 带。分档位置直接读引擎导出的
- * 常量，UI 和规则不各写一份。
+ * 时机条：轨道代表整个判定窗口，高亮区是该按的那几拍。三种原型共用这一条轨道，
+ * 差别全在**有几个靶子、落在哪**——那正是三种手感的来源。
+ *
+ * 靶子的位置与宽窄直接读引擎导出的常量，UI 和规则不各写一份。
  */
-function timingBar(): TimingBar {
+function timingBar(spec: ExecutionSpec): TimingBar {
   const root = el('section', 'timing');
-  root.appendChild(el('div', 'timing-hint', '按 空格 定格'));
+  root.appendChild(el('div', 'timing-hint', EXECUTION_HINT[spec.kind]));
 
   const track = el('div', 'timing-track');
-  track.appendChild(zone(GOOD_BAND, 'timing-good'));
-  track.appendChild(zone(PERFECT_BAND, 'timing-perfect'));
+  for (const target of spec.targets) {
+    track.appendChild(
+      zone({ start: target - spec.goodTolerance, end: target + spec.goodTolerance }, 'timing-good'),
+    );
+  }
+  for (const target of spec.targets) {
+    track.appendChild(
+      zone(
+        { start: target - spec.perfectTolerance, end: target + spec.perfectTolerance },
+        'timing-perfect',
+      ),
+    );
+  }
 
   const indicator = el('div', 'timing-indicator');
   track.appendChild(indicator);
@@ -502,8 +527,16 @@ function runTimingBar(
 function controls(state: RunState, dispatch: Dispatch): HTMLElement {
   const section = el('section', 'controls');
 
-  if (state.encounter.phase === 'awaiting_execution') {
-    section.appendChild(timingBar().root);
+  const pending = state.encounter.pending;
+  if (state.encounter.phase === 'awaiting_execution' && pending) {
+    const bar = timingBar(pending.spec);
+    // 已经按下的那几次留在轨道上：连击到第几拍了，得看得见
+    for (const at of pending.presses) {
+      const mark = el('div', 'timing-press');
+      mark.style.left = `${Math.min(100, at * 100)}%`;
+      bar.track.appendChild(mark);
+    }
+    section.appendChild(bar.root);
     return section;
   }
 

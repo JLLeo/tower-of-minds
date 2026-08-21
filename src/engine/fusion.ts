@@ -1,5 +1,5 @@
 import { MAX_ATOMS_PER_CARD, atomOf, cardTypeOf, costOf } from './atoms.js';
-import { executionForType, fusionTasteOf } from './content.js';
+import { executionFor, fusionTasteOf } from './content.js';
 import type { CardDefinition, RunState } from './types.js';
 
 /**
@@ -98,16 +98,15 @@ export interface ForgeInput {
  * 哪怕这张牌从来没有出现过。
  */
 export function forgeCard(input: ForgeInput): CardDefinition {
-  const type = cardTypeOf(input.atoms);
-  const execution = executionForType(type);
   return {
     id: `forged-${input.seq}`,
     name: input.name,
     faction: input.factionId,
     atoms: input.atoms,
     cost: costOf(input.atoms),
-    type,
-    ...(execution ? { execution } : {}),
+    type: cardTypeOf(input.atoms),
+    // 判定同样从 Atom 推出——融进来一个 steady，这张牌的窗口当场就变宽。
+    execution: executionFor(input.atoms),
   };
 }
 

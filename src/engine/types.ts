@@ -4,14 +4,42 @@ import type { Rng } from './rng.js';
 
 export type CardType = 'attack' | 'shield' | 'spell';
 
+/** 三种判定原型。玩家不看牌面，也该从**手上怎么动**认出自己在打什么类别。 */
+export type ExecutionKind =
+  /** 盾牌：等一下，在窗口末段按一次。 */
+  | 'block'
+  /** 攻击：跟着拍子连按三次。 */
+  | 'rhythm'
+  /** 法术：按一下起手，撑住，快到头再按一下放出去。 */
+  | 'charge';
+
 /**
- * Card 结算过程中需要一次实时输入的声明（ADR-0002）。
+ * Card 结算过程中需要实时输入的声明（ADR-0002）。
  *
- * 判定用哪种原型由 Card Type 决定（盾牌是格挡时机、攻击是节奏连击、法术是蓄力），
- * 所以这里只放窗口长度——原型不能是一个能和 Card Type 互相矛盾的独立字段。
+ * 原型由 Card Type 决定，不是一个能与 Card Type 互相矛盾的独立字段；三种原型共用
+ * 同一套判定：**在 targets 指定的每个时刻各按一次**，按得多准决定档位。
+ * 一次按键少了、多了，都是 Miss。
+ *
+ * windowMs / perfectMultiplier / softenMiss 会被判定轴的 Atom 改写，所以整份 spec
+ * 是从这张牌的 Atom 推出来的，而不是从 Card Type 直接查表得到的。
  */
 export interface ExecutionSpec {
+  readonly kind: ExecutionKind;
   readonly windowMs: number;
+  /** 该按的那几个时刻，按窗口长度的比例给出，升序。长度就是要按几次。 */
+  readonly targets: readonly number[];
+  /**
+   * 离目标多远还算 Perfect / Good，同样按窗口长度的比例给出。
+   *
+   * 它是每个原型自己的，不是全局常量：容差**不能宽到把相邻的拍子连成一片**，
+   * 否则节奏连击退化成「窗口里随便按三下」。拍子挨得越近，容差就得越紧。
+   */
+  readonly perfectTolerance: number;
+  readonly goodTolerance: number;
+  /** Perfect 的倍率。`focus` 把它从 1.5 提到 2.0。 */
+  readonly perfectMultiplier: number;
+  /** `reflex`：即使该算 Miss 也兜成 Good。 */
+  readonly softenMiss: boolean;
 }
 
 /** 一次 Execution Check 的结果档位。Miss 只是打折，不反噬。 */
@@ -263,6 +291,8 @@ export interface PendingExecution {
   readonly spec: ExecutionSpec;
   readonly openedAtMs: number;
   readonly remainingEffects: readonly Effect[];
+  /** 已经按下的那几个时刻，按窗口长度的比例记，升序。按满 targets 就结算。 */
+  readonly presses: readonly number[];
 }
 
 // ---------------------------------------------------------------- Encounter & Run

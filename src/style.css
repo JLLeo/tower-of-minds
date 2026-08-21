@@ -427,3 +427,14 @@ button.loadout-tab:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* 已经按下的那几拍：连击到第几下了，得看得见。 */
+.timing-press {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ink);
+  opacity: 0.55;
+}

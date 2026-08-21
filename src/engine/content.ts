@@ -11,16 +11,73 @@ import {
 } from './types.js';
 
 /**
- * Card Type 决定触发哪种 Execution Check 原型。本票只有盾牌的格挡时机；
- * 攻击的节奏连击与法术的蓄力在 #5 补上，届时把这张表填满即可。
+ * Card Type 决定触发哪种 Execution Check 原型。三种手感必须明确不同——玩家不看
+ * 牌面，也该从手上怎么动认出自己在打什么类别：
+ *
+ * - 盾牌 `block`：等一下，在窗口末段按一次。
+ * - 攻击 `rhythm`：跟着拍子连按三次，窗口更长，因为要按三下。
+ * - 法术 `charge`：按一下起手，撑住，快到头再按一下放出去。两次按键之间的那段
+ *   空白就是「蓄力」——它是三者里唯一要求你**忍住不按**的。
+ *
+ * targets 是该按的那几个时刻，按窗口长度的比例给出。
  */
-const EXECUTION_BY_TYPE: Partial<Record<CardType, ExecutionSpec>> = {
-  shield: { windowMs: 900 },
+const EXECUTION_DEFAULTS = { perfectMultiplier: 1.5, softenMiss: false } as const;
+
+/**
+ * 容差跟着拍距走。节奏连击的三拍只隔 0.25，容差再宽一点相邻的 Good 带就会连成
+ * 一片——那时「跟上拍子」和「窗口里随便按三下」就没有区别了。格挡只按一次，
+ * 前后都是空的，所以它可以给得很宽。
+ */
+const EXECUTION_BY_TYPE: Record<CardType, ExecutionSpec> = {
+  shield: {
+    kind: 'block',
+    windowMs: 900,
+    targets: [0.775],
+    perfectTolerance: 0.075,
+    goodTolerance: 0.3,
+    ...EXECUTION_DEFAULTS,
+  },
+  attack: {
+    kind: 'rhythm',
+    windowMs: 1500,
+    targets: [0.3, 0.55, 0.8],
+    perfectTolerance: 0.04,
+    goodTolerance: 0.11,
+    ...EXECUTION_DEFAULTS,
+  },
+  spell: {
+    kind: 'charge',
+    windowMs: 1300,
+    targets: [0.15, 0.85],
+    perfectTolerance: 0.06,
+    goodTolerance: 0.2,
+    ...EXECUTION_DEFAULTS,
+  },
 };
 
-/** 某个 Card Type 触发哪种判定。锻造出来的牌也要照这张表来。 */
-export function executionForType(type: CardType): ExecutionSpec | undefined {
-  return EXECUTION_BY_TYPE[type];
+/** 判定轴的三个 Atom 各自把哪一项改成什么。没带这几个 Atom 就是这套默认值。 */
+const STEADY_WINDOW_SCALE = 1.5;
+const FOCUS_PERFECT_MULTIPLIER = 2;
+
+/**
+ * 这张牌触发哪种判定，以及判定轴的 Atom 把它改成了什么样。
+ *
+ * 从 **Atom** 推出来，不是从 Card Type 查表——`steady` / `focus` / `reflex` 正是靠
+ * 这一步把 Execution Check 变成构筑的一部分：手不稳的堆 steady/reflex 把判定变宽
+ * 变软，手稳的堆 focus 把 Perfect 的收益推到 2 倍。
+ */
+export function executionFor(atoms: readonly string[]): ExecutionSpec {
+  const base = EXECUTION_BY_TYPE[cardTypeOf(atoms)];
+  return {
+    ...base,
+    windowMs: atoms.includes('steady')
+      ? Math.round(base.windowMs * STEADY_WINDOW_SCALE)
+      : base.windowMs,
+    perfectMultiplier: atoms.includes('focus')
+      ? FOCUS_PERFECT_MULTIPLIER
+      : base.perfectMultiplier,
+    softenMiss: atoms.includes('reflex'),
+  };
 }
 
 /**
@@ -36,16 +93,14 @@ function defineCard(
   if (atoms.length === 0 || atoms.length > MAX_ATOMS_PER_CARD) {
     throw new Error(`${id} 的 Atom 数量必须在 1 到 ${MAX_ATOMS_PER_CARD} 之间`);
   }
-  const type = cardTypeOf(atoms);
-  const execution = EXECUTION_BY_TYPE[type];
   return {
     id,
     name,
     faction,
     atoms,
     cost: costOf(atoms),
-    type,
-    ...(execution ? { execution } : {}),
+    type: cardTypeOf(atoms),
+    execution: executionFor(atoms),
   };
 }
 
@@ -65,6 +120,10 @@ const RED_RING: readonly CardDefinition[] = [
   // Loadout 只能取自一个 Faction，所以每一派都得拿得出另一条轴上的基本功——
   // 派系的性格在于**怎么**挡、**怎么**打，不在于能不能。
   defineCard('formup', '立阵', 'red-ring', ['guard']),
+  // 判定轴的牌。两派各拿两张，但拿的不是同一套：赤环奖励**按得准**（focus），
+  // 青蔓奖励**不会崩**（reflex），steady 两边都有——想把窗口放宽是谁都有的需求。
+  defineCard('focusblow', '凝神', 'red-ring', ['strike', 'focus']),
+  defineCard('steadyaim', '屏息', 'red-ring', ['pierce', 'steady']),
 ];
 
 /** 青蔓：韧性与资源。 */
@@ -81,6 +140,8 @@ const GREEN_VINE: readonly CardDefinition[] = [
   defineCard('scavenge', '拾遗', 'green-vine', ['recall', 'draw']),
   defineCard('truce', '止戈', 'green-vine', ['parley']),
   defineCard('vinewhip', '藤鞭', 'green-vine', ['strike']),
+  defineCard('steadyguard', '稳桩', 'green-vine', ['guard', 'steady']),
+  defineCard('reflexcoil', '本能', 'green-vine', ['endure', 'reflex']),
 ];
 
 export const CARD_POOL: readonly CardDefinition[] = [...RED_RING, ...GREEN_VINE];

@@ -29,7 +29,14 @@ import {
 } from './unlocks.js';
 import { PLAYER_TARGET } from './types.js';
 import type { AgentRequest, DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
-import type { CombatantState, PlayerInput, RunOptions, RunState, UnlockLedger } from './types.js';
+import type {
+  CombatantState,
+  ExecutionSpec,
+  PlayerInput,
+  RunOptions,
+  RunState,
+  UnlockLedger,
+} from './types.js';
 
 const SEED = 20260818;
 
@@ -59,6 +66,48 @@ function pressAt(state: RunState, progress: number): PlayerInput {
   const pending = state.encounter.pending;
   if (!pending) throw new Error('没有挂起的结算');
   return { type: 'execution_input', atMs: pending.openedAtMs + pending.spec.windowMs * progress };
+}
+
+/**
+ * 按在下一个还没按过的靶子上。band 决定档位——容差是每个原型自己的，所以这里
+ * 按档位说话，不写死一个比例。
+ */
+type Band = 'perfect' | 'good' | 'miss';
+
+function offsetFor(spec: ExecutionSpec, band: Band): number {
+  if (band === 'perfect') return 0;
+  if (band === 'good') return (spec.perfectTolerance + spec.goodTolerance) / 2;
+  return spec.goodTolerance + 0.02;
+}
+
+function pressBeat(state: RunState, band: Band): PlayerInput {
+  const pending = state.encounter.pending;
+  if (!pending) throw new Error('没有挂起的结算');
+  const target = pending.spec.targets[pending.presses.length];
+  if (target === undefined) throw new Error('这一次判定已经按满了');
+  const at = target + offsetFor(pending.spec, band);
+  return {
+    type: 'execution_input',
+    atMs: pending.openedAtMs + pending.spec.windowMs * at,
+  };
+}
+
+/**
+ * 一路按到结算完。offset 决定档位：0 是 Perfect，GOOD_OFFSET 是 Good。
+ *
+ * 大多数测试关心的是效果本身，不是手稳不稳——所以它们一律按成 Good（×1），
+ * 数值和引入判定之前完全一致。手稳不稳有专门的一节。
+ */
+function settleAt(state: RunState, band: Band): RunState {
+  let next = state;
+  while (next.encounter.phase === 'awaiting_execution' && next.encounter.pending) {
+    next = applyInput(next, pressBeat(next, band));
+  }
+  return next;
+}
+
+function settleGood(state: RunState): RunState {
+  return settleAt(state, 'good');
 }
 
 /** 贪心策略：能打就打，挂起就用完美时机接上，打不动就结束回合。 */
@@ -126,7 +175,7 @@ function scriptInputs(start: RunState, maxSteps = 3000): PlayerInput[] {
         atMs: at(),
       };
     } else if (state.encounter.phase === 'awaiting_execution') {
-      input = pressAt(state, 0.75);
+      input = pressBeat(state, 'good');
     } else {
       // 一个还算像样的玩家：挑最快能清掉的那个 Faction 集火，血少了先找护体牌。
       const byFaction = new Map<string, number>();
@@ -169,12 +218,15 @@ function playCardById(state: RunState, definitionId: string, atMs = 100): RunSta
   return applyInput(state, { type: 'play_card', instanceId: card.instanceId, atMs });
 }
 
-/** 打出一张会挂起判定的牌，并以 Good 的时机接上——倍率为 1，数值好断言。 */
-function playAndResolve(state: RunState, definitionId: string): RunState {
-  const suspended = playCardById(state, definitionId, 0);
-  if (suspended.encounter.phase !== 'awaiting_execution') return suspended;
-  return applyInput(suspended, pressAt(suspended, 0.5));
+/**
+ * 打一张牌并把判定按成 Good。三类牌都会挂起判定（#5），所以这才是常态；
+ * 要看挂起本身的测试用 playCardById。
+ */
+function playCard(state: RunState, definitionId: string, atMs = 0): RunState {
+  return settleGood(playCardById(state, definitionId, atMs));
 }
+
+
 
 /**
  * 让某个 Combatant 安静地过掉这一回合：用它自己的防御动作。
@@ -217,9 +269,15 @@ function onlyOneActs(state: RunState, except: string, payload: unknown): RunStat
   return answerAll(state, (id) => (id === except ? payload : defendPayload(state, id)));
 }
 
+/**
+ * 顺次喂输入，每一步之后把挂起的判定按成 Good。
+ *
+ * 攻击、盾牌、法术三类牌都会挂起判定（#5），所以几乎每条测试都得接上一次判定。
+ * 按成 Good 意味着倍率是 1：这些测试断言的数值因此和引入判定之前一模一样。
+ */
 function run(inputs: readonly PlayerInput[], options?: RunOptions): RunState {
   let state = beginRun(SEED, options);
-  for (const input of inputs) state = applyInput(state, input);
+  for (const input of inputs) state = settleGood(applyInput(state, input));
   return state;
 }
 
@@ -252,7 +310,7 @@ describe('Card 循环', () => {
     const definition = definitionOf(state, card!.instanceId);
     expect(definition).toBeDefined();
 
-    const next = applyInput(state, { type: 'play_card', instanceId: card!.instanceId, atMs: 100 });
+    const next = settleGood(applyInput(state, { type: 'play_card', instanceId: card!.instanceId, atMs: 100 }));
 
     expect(next.encounter.player.hand).toHaveLength(4);
     expect(next.encounter.player.discardPile.map((c) => c.instanceId)).toContain(card!.instanceId);
@@ -264,18 +322,18 @@ describe('Card 循环', () => {
     const at = clock();
     for (let i = 0; i < 3; i++) {
       const playable = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-      state = applyInput(state, {
+      state = settleGood(applyInput(state, {
         type: 'play_card',
         instanceId: playable!.instanceId,
         atMs: at(),
-      });
+      }));
     }
 
     expect(state.encounter.player.energy).toBe(0);
     const leftover = state.encounter.player.hand[0];
     expect(canPlay(state, leftover!.instanceId)).toBe(false);
     expect(
-      applyInput(state, { type: 'play_card', instanceId: leftover!.instanceId, atMs: at() }),
+      settleGood(applyInput(state, { type: 'play_card', instanceId: leftover!.instanceId, atMs: at() })),
     ).toEqual(state);
   });
 
@@ -517,6 +575,7 @@ describe('Execution Check：挂起与恢复（ADR-0002）', () => {
     expect(state.encounter.phase).toBe('awaiting_execution');
     expect(state.encounter.pending?.openedAtMs).toBe(100);
     expect(state.encounter.pending?.spec.windowMs).toBe(900);
+    expect(state.encounter.pending?.presses).toEqual([]);
     expect(state.encounter.player.block).toBe(0); // 效果尚未落地
   });
 
@@ -540,7 +599,7 @@ describe('Execution Check：挂起与恢复（ADR-0002）', () => {
   });
 
   it('每回合只挂起一次，同回合的后续 Card 直接结算', () => {
-    const resumed = applyInput(suspended(), pressAt(suspended(), 0.75));
+    const resumed = applyInput(suspended(), pressAt(suspended(), 0.775));
     expect(resumed.encounter.executionUsedThisTurn).toBe(true);
 
     const second = resumed.encounter.player.hand[0];
@@ -557,7 +616,7 @@ describe('Execution Check：挂起与恢复（ADR-0002）', () => {
   });
 
   it('新回合重新允许一次挂起', () => {
-    const resumed = applyInput(suspended(), pressAt(suspended(), 0.75));
+    const resumed = applyInput(suspended(), pressAt(suspended(), 0.775));
     const nextTurn = applyInput(resumed, { type: 'end_turn', atMs: 10_000 });
     expect(nextTurn.encounter.executionUsedThisTurn).toBe(false);
     expect(nextTurn.encounter.lastGrade).toBeNull();
@@ -574,40 +633,112 @@ describe('Execution Check：挂起与恢复（ADR-0002）', () => {
   });
 });
 
-describe('Execution Check：档位与倍率', () => {
-  function blockAfter(inputs: (state: RunState) => readonly PlayerInput[]): RunState {
-    const start = beginRun(SEED, ALL_GUARDS);
-    const card = start.encounter.player.hand[0];
-    const suspended = applyInput(start, {
-      type: 'play_card',
-      instanceId: card!.instanceId,
-      atMs: 0,
-    });
-    let state = suspended;
-    for (const input of inputs(suspended)) state = applyInput(state, input);
-    return state;
+describe('Execution Check：三种原型', () => {
+  /** 打出一张牌，停在挂起状态。三类牌现在都会挂起。 */
+  function hang(cardId: string): RunState {
+    return playCardById(beginRun(SEED, deckOf(cardId)), cardId, 0);
   }
 
-  const pressedAt = (progress: number) => (state: RunState) => [pressAt(state, progress)];
+  it('三种 Card Type 各有各的原型，操作方式明确不同', () => {
+    const block = hang('guard').encounter.pending!.spec;
+    const rhythm = hang('strike').encounter.pending!.spec;
+    const charge = hang('siphon').encounter.pending!.spec;
 
-  it('三档对格挡强度的影响各不相同', () => {
-    const miss = blockAfter(pressedAt(0.1));
-    const good = blockAfter(pressedAt(0.5));
-    const perfect = blockAfter(pressedAt(0.75));
+    expect(block.kind).toBe('block');
+    expect(rhythm.kind).toBe('rhythm');
+    expect(charge.kind).toBe('charge');
 
-    expect(miss.encounter.lastGrade).toBe('miss');
-    expect(good.encounter.lastGrade).toBe('good');
-    expect(perfect.encounter.lastGrade).toBe('perfect');
+    // 按几次、按在哪，才是三种手感的来源
+    expect(block.targets).toHaveLength(1);
+    expect(rhythm.targets).toHaveLength(3);
+    expect(charge.targets).toHaveLength(2);
+
+    // 蓄力那一段空白是 charge 独有的：它是唯一要求你忍住不按的
+    const gap = charge.targets[1]! - charge.targets[0]!;
+    const beat = rhythm.targets[1]! - rhythm.targets[0]!;
+    expect(gap).toBeGreaterThan(beat * 2);
+  });
+
+  it('格挡：按一次，三档各不相同', () => {
+    const base = hang('guard');
+    const at = (progress: number): RunState => applyInput(base, pressAt(base, progress));
+
+    expect(at(0.1).encounter.lastGrade).toBe('miss');
+    expect(at(0.5).encounter.lastGrade).toBe('good');
+    expect(at(0.775).encounter.lastGrade).toBe('perfect');
 
     // 基础格挡 5：失手 3、还行 5、完美 8
-    expect(miss.encounter.player.block).toBe(3);
-    expect(good.encounter.player.block).toBe(5);
-    expect(perfect.encounter.player.block).toBe(8);
+    expect(at(0.1).encounter.player.block).toBe(3);
+    expect(at(0.5).encounter.player.block).toBe(5);
+    expect(at(0.775).encounter.player.block).toBe(8);
+  });
+
+  it('节奏连击：三拍都得跟上，三档各不相同', () => {
+    const foeHp = (state: RunState): number => state.encounter.combatants[0]!.hp;
+    const before = foeHp(hang('strike'));
+
+    const perfect = settleAt(hang('strike'), 'perfect');
+    const good = settleAt(hang('strike'), 'good');
+    const missed = settleAt(hang('strike'), 'miss');
+
+    expect(perfect.encounter.lastGrade).toBe('perfect');
+    expect(good.encounter.lastGrade).toBe('good');
+    expect(missed.encounter.lastGrade).toBe('miss');
+
+    // 劈砍 6 点：失手 3、还行 6、完美 9
+    expect(before - foeHp(missed)).toBe(3);
+    expect(before - foeHp(good)).toBe(6);
+    expect(before - foeHp(perfect)).toBe(9);
+  });
+
+  it('节奏连击：少按一拍会拖到窗口耗尽，判 Miss', () => {
+    const base = hang('strike');
+    const one = applyInput(base, pressBeat(base, 'perfect'));
+    expect(one.encounter.phase).toBe('awaiting_execution'); // 还在等下一拍
+
+    const pending = one.encounter.pending!;
+    const expired = applyInput(one, {
+      type: 'tick',
+      atMs: pending.openedAtMs + pending.spec.windowMs,
+    });
+    expect(expired.encounter.lastGrade).toBe('miss');
+  });
+
+  it('节奏连击：按键是按顺序对拍子的，中间插一下就把整串都推歪了', () => {
+    expect(settleAt(hang('strike'), 'perfect').encounter.lastGrade).toBe('perfect');
+
+    // 第一拍按准，第二下却按在第一拍附近——它顶掉了第二拍的位置，整串就废了
+    let state = hang('strike');
+    state = applyInput(state, pressBeat(state, 'perfect'));
+    state = applyInput(state, pressAt(state, 0.32));
+    state = applyInput(state, pressBeat(state, 'perfect'));
+
+    expect(state.encounter.lastGrade).toBe('miss');
+  });
+
+  it('蓄力：按一下起手，撑住，再按一下放出去', () => {
+    const perfect = settleAt(hang('siphon'), 'perfect');
+    const good = settleAt(hang('siphon'), 'good');
+
+    expect(perfect.encounter.lastGrade).toBe('perfect');
+    expect(good.encounter.lastGrade).toBe('good');
+    // 完美蓄力多抽一张：法术的效果也吃档位，否则蓄力这个原型就是装饰
+    expect(perfect.encounter.player.hand.length).toBeGreaterThan(
+      good.encounter.player.hand.length,
+    );
+  });
+
+  it('蓄力：起手就放，撑不住，判 Miss', () => {
+    let state = hang('siphon');
+    state = applyInput(state, pressAt(state, 0.15)); // 起手准
+    state = applyInput(state, pressAt(state, 0.25)); // 但立刻就放了
+    expect(state.encounter.lastGrade).toBe('miss');
   });
 
   it('Miss 只是打折，仍然给出格挡而不是反噬', () => {
-    const miss = blockAfter(pressedAt(0.1));
-    const good = blockAfter(pressedAt(0.5));
+    const base = hang('guard');
+    const miss = applyInput(base, pressAt(base, 0.1));
+    const good = applyInput(base, pressAt(base, 0.5));
 
     expect(miss.encounter.player.block).toBeGreaterThan(0);
     expect(miss.encounter.player.block).toBeLessThan(good.encounter.player.block);
@@ -615,13 +746,11 @@ describe('Execution Check：档位与倍率', () => {
   });
 
   it('完全不按：窗口耗尽后结算照常推进，判为 Miss', () => {
-    const expired = blockAfter((state) => {
-      const pending = state.encounter.pending!;
-      // 只有时间在流逝，没有任何 execution_input
-      return [
-        { type: 'tick', atMs: pending.openedAtMs + pending.spec.windowMs * 0.5 },
-        { type: 'tick', atMs: pending.openedAtMs + pending.spec.windowMs },
-      ];
+    const base = hang('guard');
+    const pending = base.encounter.pending!;
+    const expired = applyInput(base, {
+      type: 'tick',
+      atMs: pending.openedAtMs + pending.spec.windowMs,
     });
 
     expect(expired.encounter.phase).toBe('player_turn');
@@ -631,22 +760,16 @@ describe('Execution Check：档位与倍率', () => {
   });
 
   it('窗口还没走完时 tick 不改变任何东西', () => {
-    const start = beginRun(SEED, ALL_GUARDS);
-    const card = start.encounter.player.hand[0];
-    const suspended = applyInput(start, {
-      type: 'play_card',
-      instanceId: card!.instanceId,
-      atMs: 0,
-    });
-    const pending = suspended.encounter.pending!;
+    const base = hang('guard');
+    const pending = base.encounter.pending!;
 
-    const ticked = applyInput(suspended, {
+    const ticked = applyInput(base, {
       type: 'tick',
       atMs: pending.openedAtMs + pending.spec.windowMs * 0.5,
     });
 
     // 原样返回同一个对象，调用方据此跳过重绘
-    expect(ticked).toBe(suspended);
+    expect(ticked).toBe(base);
   });
 
   it('既没有挂起结算、也没到 Intent 截止点时，tick 是空操作', () => {
@@ -655,34 +778,102 @@ describe('Execution Check：档位与倍率', () => {
   });
 });
 
+describe('判定轴 Atom：把 Execution Check 变成构筑的一部分', () => {
+  function hang(cardId: string): RunState {
+    return playCardById(beginRun(SEED, deckOf(cardId)), cardId, 0);
+  }
+
+  it('steady 把判定窗口放宽——手不稳的人靠它把窗口变长', () => {
+    const plain = hang('guard').encounter.pending!.spec;
+    const steady = hang('steadyguard').encounter.pending!.spec;
+
+    expect(steady.kind).toBe(plain.kind); // 还是格挡，只是窗口变宽了
+    expect(steady.windowMs).toBeGreaterThan(plain.windowMs);
+    // 容差是比例，窗口一长，同样的比例就是更多的毫秒——真的更好按了
+    const widened =
+      steady.windowMs * steady.perfectTolerance - plain.windowMs * plain.perfectTolerance;
+    expect(widened).toBeGreaterThan(0);
+  });
+
+  it('focus 把 Perfect 的倍率从 1.5 提到 2.0——手稳的人靠它把收益推上去', () => {
+    const foeHp = (state: RunState): number => state.encounter.combatants[0]!.hp;
+    const before = foeHp(hang('strike'));
+
+    // 劈砍与凝神都是 strike 打底，差别只在那一个判定轴 Atom
+    expect(settleAt(hang('strike'), 'perfect').encounter.lastGrade).toBe('perfect');
+    expect(before - foeHp(settleAt(hang('strike'), 'perfect'))).toBe(9); // 6 × 1.5
+    expect(before - foeHp(settleAt(hang('focusblow'), 'perfect'))).toBe(12); // 6 × 2.0
+
+    // 但它只加 Perfect 那一档：没按准的时候一点用都没有
+    expect(before - foeHp(settleAt(hang('focusblow'), 'miss'))).toBe(
+      before - foeHp(settleAt(hang('strike'), 'miss')),
+    );
+  });
+
+  it('reflex 把 Miss 兜成 Good，但兜不出 Perfect', () => {
+    expect(settleAt(hang('brace'), 'miss').encounter.lastGrade).toBe('miss');
+    expect(settleAt(hang('reflexcoil'), 'miss').encounter.lastGrade).toBe('good');
+
+    // 买的是下限，不是上限：按准了还是 Perfect，按到 Good 带里还是 Good
+    expect(settleAt(hang('reflexcoil'), 'perfect').encounter.lastGrade).toBe('perfect');
+    expect(settleAt(hang('reflexcoil'), 'good').encounter.lastGrade).toBe('good');
+  });
+
+  it('判定轴 Atom 参与费用：它们不是白送的', () => {
+    for (const id of ['steady', 'focus', 'reflex']) {
+      expect(costOf(['guard', id])).toBeGreaterThan(costOf(['guard']));
+    }
+  });
+
+  it('判定轴 Atom 不产生 Effect——它们改的是怎么判，不是打出去什么', () => {
+    for (const id of ['steady', 'focus', 'reflex']) {
+      expect(effectsOf([id], 'x')).toHaveLength(0);
+    }
+  });
+
+  it('融合融进一个判定轴 Atom，锻出来的牌当场就换判定', () => {
+    // 判定是从 Atom 推出来的，所以从来没出现过的牌也照样算得出来
+    const plain = beginRun(SEED, deckOf('guard'));
+    expect(cardById(plain, 'guard')?.execution?.windowMs).toBe(900);
+    expect(cardById(plain, 'steadyguard')?.execution?.windowMs).toBe(1350);
+  });
+});
+
 describe('Atom 系统', () => {
   it('费用由 Atom 权重推出：打出后扣掉的能量就是算出来的那个数', () => {
     const one = beginRun(SEED, deckOf('strike'));
-    expect(one.encounter.player.energy - playCardById(one, 'strike').encounter.player.energy).toBe(
+    expect(one.encounter.player.energy - playCard(one, 'strike').encounter.player.energy).toBe(
       1,
     ); // strike(3) -> ceil(3/3)
 
     const two = beginRun(SEED, deckOf('heavy'));
-    expect(two.encounter.player.energy - playCardById(two, 'heavy').encounter.player.energy).toBe(
+    expect(two.encounter.player.energy - playCard(two, 'heavy').encounter.player.energy).toBe(
       2,
     ); // strike(3)+pierce(3) -> ceil(6/3)
   });
 
-  it('Card Type 由主导 Atom 推出：防御为主的牌才会触发格挡判定', () => {
-    // 铁壁 = guard + endure，防御轴占多数 -> shield -> 挂起判定
+  it('Card Type 由主导 Atom 推出，判定原型跟着 Card Type 走', () => {
+    // 铁壁 = guard + endure，防御轴占多数 -> shield -> 格挡判定
     const shield = beginRun(SEED, deckOf('bulwark'));
-    expect(playCardById(shield, 'bulwark').encounter.phase).toBe('awaiting_execution');
+    const bracing = playCardById(shield, 'bulwark');
+    expect(bracing.encounter.phase).toBe('awaiting_execution');
+    expect(bracing.encounter.pending?.spec.kind).toBe('block');
 
-    // 汲取 = draw，只有资源轴 -> spell -> 本票还没有它的判定原型
+    // 汲取 = draw，只有资源轴 -> spell -> 蓄力判定
     const spell = beginRun(SEED, deckOf('siphon'));
-    expect(playCardById(spell, 'siphon').encounter.phase).toBe('player_turn');
+    const charging = playCardById(spell, 'siphon');
+    expect(charging.encounter.phase).toBe('awaiting_execution');
+    expect(charging.encounter.pending?.spec.kind).toBe('charge');
   });
 
   it('每个已落地的 Atom 都真的产生效果——不会只收费不干活', () => {
     // 这条不在 seam 上：它守的是 Atom 表本身的完整性，而不是某个行为。
     // 没有它，新加的 Atom 会静默地只参与费用计算却什么都不做。
+    //
+    // 判定轴例外，而且是有意的：steady / focus / reflex 改的是**这张牌怎么判**，
+    // 不是打出去什么。它们的作用由「判定轴 Atom」那一节盯着。
     for (const atom of ATOMS) {
-      if (atom.pendingTicket) continue;
+      if (atom.pendingTicket || atom.axis === 'execution') continue;
       expect(effectsOf([atom.id], 'tower-guard').length).toBeGreaterThan(0);
     }
   });
@@ -719,8 +910,9 @@ describe('Atom 系统', () => {
   });
 
   it('尚未落地的 Atom 参与费用，但不出现在任何 Base Card 上', () => {
+    // #5 之后判定轴也落地了，这张名单眼下是空的——这条留着，是给下一个引入
+    // 待落地 Atom 的票用的：它一进来就得同时满足「参与费用」和「不进 Base Card」。
     const pending = ATOMS.filter((a) => a.pendingTicket && !a.forbidden);
-    expect(pending.length).toBeGreaterThan(0);
     for (const atom of pending) expect(atom.weight).toBeGreaterThan(0);
 
     const pendingIds = new Set(pending.map((a) => a.id));
@@ -750,7 +942,7 @@ describe('Atom 效果', () => {
     expect(foeOf(state).block).toBe(5);
 
     const before = foeOf(state).hp;
-    const after = playCardById(state, 'rend');
+    const after = playCard(state, 'rend');
 
     expect(foeOf(after).hp).toBe(before - 4);
     expect(foeOf(after).block).toBe(5);
@@ -759,13 +951,13 @@ describe('Atom 效果', () => {
   it('multi 的分段不会绕过格挡：格挡在各段之间共享', () => {
     let state = beginRun(SEED, deckOf('flurry'));
 
-    const bare = playCardById(state, 'flurry');
+    const bare = playCard(state, 'flurry');
     expect(foeOf(bare).hp).toBe(foeOf(state).hp - 6); // 3 段各 2
 
     state = answerWith(state, 'brace');
     state = applyInput(state, { type: 'end_turn', atMs: 1000 });
     const guardedHp = foeOf(state).hp;
-    const blocked = playCardById(state, 'flurry');
+    const blocked = playCard(state, 'flurry');
 
     // 6 点总伤害对 5 点格挡，漏过去 1 点——和一次性打 6 点是一样的
     expect(foeOf(blocked).hp).toBe(guardedHp - 1);
@@ -779,18 +971,18 @@ describe('Atom 效果', () => {
     const opened = beginRun(SEED, deck);
     const before = foeOf(opened).hp;
 
-    const exposed = playCardById(opened, 'crack');
+    const exposed = playCard(opened, 'crack');
     // 分段：3 + 2 + 2 = 7
-    expect(foeOf(playCardById(exposed, 'flurry')).hp).toBe(before - 7);
+    expect(foeOf(playCard(exposed, 'flurry')).hp).toBe(before - 7);
     // 一次性：round(6 * 1.5) = 9
-    expect(foeOf(playCardById(exposed, 'strike')).hp).toBe(before - 9);
+    expect(foeOf(playCard(exposed, 'strike')).hp).toBe(before - 9);
   });
 
   it('burn 在回合末结算，并按回合数递减', () => {
     let state = beginRun(SEED, deckOf('ignite'));
     const before = foeOf(state).hp;
 
-    state = playCardById(state, 'ignite');
+    state = playCard(state, 'ignite');
     expect(foeOf(state).hp).toBe(before);
     expect(foeOf(state).statuses.burn).toBe(3);
 
@@ -812,14 +1004,14 @@ describe('Atom 效果', () => {
     });
     const before = foeOf(state).hp;
 
-    state = playCardById(state, 'crack');
+    state = playCard(state, 'crack');
     expect(foeOf(state).statuses.exposed).toBe(true);
 
-    state = playCardById(state, 'strike');
+    state = playCard(state, 'strike');
     expect(foeOf(state).hp).toBe(before - 9);
     expect(foeOf(state).statuses.exposed).toBe(false);
 
-    state = playCardById(state, 'strike');
+    state = playCard(state, 'strike');
     expect(foeOf(state).hp).toBe(before - 15);
   });
 
@@ -828,7 +1020,7 @@ describe('Atom 效果', () => {
     state = answerWith(state, 'slash');
     const hpBefore = state.encounter.player.hp;
 
-    state = playCardById(state, 'sap');
+    state = playCard(state, 'sap');
     expect(foeOf(state).statuses.weakened).toBe(true);
 
     state = applyInput(state, { type: 'end_turn', atMs: 1000 });
@@ -844,8 +1036,8 @@ describe('Atom 效果', () => {
     let state = beginRun(SEED, deck);
     state = answerWith(state, 'slash');
 
-    state = playAndResolve(state, 'bramble');
-    state = playCardById(state, 'crack');
+    state = playCard(state, 'bramble');
+    state = playCard(state, 'crack');
     expect(foeOf(state).statuses.exposed).toBe(true);
 
     // 对手攻击 -> 触发反伤。易伤不该在这里被花掉。
@@ -857,7 +1049,7 @@ describe('Atom 效果', () => {
     let state = beginRun(SEED, deckOf('bramble'));
     state = answerWith(state, 'slash');
 
-    state = playAndResolve(state, 'bramble');
+    state = playCard(state, 'bramble');
     expect(state.encounter.player.statuses.thorns).toBe(3);
     const foeHp = foeOf(state).hp;
 
@@ -870,7 +1062,7 @@ describe('Atom 效果', () => {
     state = answerWith(state, 'slash');
     const hpBefore = state.encounter.player.hp;
 
-    state = playAndResolve(state, 'brace');
+    state = playCard(state, 'brace');
     expect(state.encounter.player.statuses.endure).toBe(2);
 
     state = applyInput(state, { type: 'end_turn', atMs: 1000 });
@@ -881,12 +1073,12 @@ describe('Atom 效果', () => {
   it('draw 抽牌、surge 给能量', () => {
     let siphon = beginRun(SEED, deckOf('siphon'));
     const handBefore = siphon.encounter.player.hand.length;
-    siphon = playCardById(siphon, 'siphon');
+    siphon = playCard(siphon, 'siphon');
     expect(siphon.encounter.player.hand.length).toBe(handBefore); // 打掉一张、抽回一张
 
     let surged = beginRun(SEED, deckOf('surge'));
     const energyBefore = surged.encounter.player.energy;
-    surged = playCardById(surged, 'surge');
+    surged = playCard(surged, 'surge');
     expect(surged.encounter.player.energy).toBe(energyBefore); // -1 费 +1 能量
   });
 
@@ -898,15 +1090,15 @@ describe('Atom 效果', () => {
 
     // 弃牌堆空着的时候打出回收：它不该把自己捡回来
     const empty = beginRun(SEED, deck);
-    const alone = playCardById(empty, 'glean');
+    const alone = playCard(empty, 'glean');
     expect(alone.encounter.player.discardPile).toHaveLength(1);
     expect(alone.encounter.player.discardPile[0]?.instanceId).toContain('glean');
     expect(alone.encounter.player.hand).toHaveLength(4);
 
     // 弃牌堆里有东西时，取回的是那张
-    const played = playCardById(empty, 'strike');
+    const played = playCard(empty, 'strike');
     expect(played.encounter.player.discardPile).toHaveLength(1);
-    const recalled = playCardById(played, 'glean');
+    const recalled = playCard(played, 'glean');
     expect(recalled.encounter.player.discardPile).toHaveLength(1);
     expect(recalled.encounter.player.discardPile[0]?.instanceId).toContain('glean');
     expect(
@@ -1026,12 +1218,12 @@ describe('多方混战与站队', () => {
     expect(currentSiding(state)).toBeNull(); // 还没出手，谈不上偏袒
 
     const scout = state.encounter.player.hand[0]!;
-    state = applyInput(state, {
+    state = settleGood(applyInput(state, {
       type: 'play_card',
       instanceId: scout.instanceId,
       atMs: 100,
       targetId: SCOUT,
-    });
+    }));
 
     expect(state.encounter.damageDealtTo['green-vine']).toBe(6);
     expect(state.encounter.damageDealtTo['red-ring']).toBeUndefined();
@@ -1043,12 +1235,12 @@ describe('多方混战与站队', () => {
     // 否则玩家可以把一个 Faction 烧死，账本上却显示他偏袒的正是这一方
     let state = fresh(deckOf('ignite'));
     const card = state.encounter.player.hand[0]!;
-    state = applyInput(state, {
+    state = settleGood(applyInput(state, {
       type: 'play_card',
       instanceId: card.instanceId,
       atMs: 100,
       targetId: SCOUT,
-    });
+    }));
     expect(state.encounter.damageDealtTo['green-vine']).toBeUndefined(); // 打出时不掉血
 
     state = applyInput(allDefend(state), { type: 'end_turn', atMs: 1000 });
@@ -1068,12 +1260,12 @@ describe('多方混战与站队', () => {
           isBossFloor(state.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
-        state = applyInput(state, {
+        state = settleGood(applyInput(state, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: victim.id,
-        });
+        }));
       }
       if (state.phase !== 'in_encounter') break;
       state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -1089,12 +1281,12 @@ describe('多方混战与站队', () => {
     let state = fresh(deckOf('strike'));
     for (const target of [SCOUT, GUARD]) {
       const card = state.encounter.player.hand[0]!;
-      state = applyInput(state, {
+      state = settleGood(applyInput(state, {
         type: 'play_card',
         instanceId: card.instanceId,
         atMs: 100,
         targetId: target,
-      });
+      }));
     }
 
     expect(state.encounter.damageDealtTo['green-vine']).toBe(6);
@@ -1114,12 +1306,12 @@ describe('多方混战与站队', () => {
           isBossFloor(state.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
-        state = applyInput(state, {
+        state = settleGood(applyInput(state, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: victim.id,
-        });
+        }));
       }
       if (state.phase !== 'in_encounter') break;
       state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -1148,12 +1340,12 @@ describe('多 Floor 推进与 Favor', () => {
           isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
-        next = applyInput(next, {
+        next = settleGood(applyInput(next, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: victim.id,
-        });
+        }));
       }
       if (next.phase !== 'in_encounter') break;
       next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -1214,7 +1406,7 @@ describe('多 Floor 推进与 Favor', () => {
     // 玩家这边：除了选 Favor 和发起融合，什么都不生效
     expect(applyInput(cleared, { type: 'end_turn', atMs: 20_000 })).toBe(cleared);
     expect(
-      applyInput(cleared, { type: 'play_card', instanceId: 'strike#0', atMs: 20_000 }),
+      settleGood(applyInput(cleared, { type: 'play_card', instanceId: 'strike#0', atMs: 20_000 })),
     ).toBe(cleared);
 
     // 对手这边：层间构筑是并行的，时间流逝与模型的回答照常放行
@@ -1286,12 +1478,12 @@ describe('Memory 与 Standing', () => {
           isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
-        next = applyInput(next, {
+        next = settleGood(applyInput(next, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: victim.id,
-        });
+        }));
       }
       if (next.phase !== 'in_encounter') break;
       next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -1304,12 +1496,12 @@ describe('Memory 与 Standing', () => {
   it('玩家打出的牌被在场的每个 Faction 记住', () => {
     let state = fresh(deckOf('strike'));
     const card = state.encounter.player.hand[0]!;
-    state = applyInput(state, {
+    state = settleGood(applyInput(state, {
       type: 'play_card',
       instanceId: card.instanceId,
       atMs: 100,
       targetId: 'vine-scout',
-    });
+    }));
 
     for (const factionId of ['red-ring', 'green-vine']) {
       const seen = memoryOf(state, factionId).filter((e) => e.kind === 'card_played');
@@ -1328,12 +1520,12 @@ describe('Memory 与 Standing', () => {
     for (let i = 0; i < 2; i++) {
       const card = state.encounter.player.hand.find((c) => c.instanceId.startsWith('strike#'));
       if (!card) break;
-      state = applyInput(state, {
+      state = settleGood(applyInput(state, {
         type: 'play_card',
         instanceId: card.instanceId,
         atMs: 100 * (i + 1),
         targetId: 'vine-scout',
-      });
+      }));
     }
 
     const seen = new Set(
@@ -1401,12 +1593,12 @@ describe('Memory 与 Standing', () => {
     const before = standings(state)['green-vine'] ?? 0;
     const card = state.encounter.player.hand[0]!;
 
-    state = applyInput(state, {
+    state = settleGood(applyInput(state, {
       type: 'play_card',
       instanceId: card.instanceId,
       atMs: 100,
       targetId: 'vine-scout',
-    });
+    }));
 
     expect(memoryOf(state, 'green-vine').some((e) => e.kind === 'parley')).toBe(true);
     expect(standings(state)['green-vine']).toBe(before + 1);
@@ -1459,12 +1651,12 @@ describe('Fusion 与 Mutation', () => {
           isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
-        next = applyInput(next, {
+        next = settleGood(applyInput(next, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: victim.id,
-        });
+        }));
       }
       if (next.phase !== 'in_encounter') break;
       next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -1736,12 +1928,12 @@ describe('对手也在构筑', () => {
           isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
-        next = applyInput(next, {
+        next = settleGood(applyInput(next, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: victim.id,
-        });
+        }));
       }
       if (next.phase !== 'in_encounter') break;
       next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -1820,12 +2012,12 @@ describe('对手也在构筑', () => {
           isBossFloor(state.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
-        state = applyInput(state, {
+        state = settleGood(applyInput(state, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: victim.id,
-        });
+        }));
       }
       if (state.phase !== 'in_encounter') break;
       state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -2102,12 +2294,12 @@ describe('Boss 层（ADR-0008）', () => {
         const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
         const boss = bossOf(state);
         if (!card || !boss || boss.hp <= 0) break;
-        state = applyInput(state, {
+        state = settleGood(applyInput(state, {
           type: 'play_card',
           instanceId: card.instanceId,
           atMs: 100 * turn + 1,
           targetId: boss.id,
-        });
+        }));
       }
       if (state.phase !== 'in_encounter') break;
       state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
@@ -2166,7 +2358,7 @@ function playOut(
 
     state = allDefend(state);
     if (state.encounter.phase === 'awaiting_execution') {
-      state = applyInput(state, pressAt(state, 0.75));
+      state = applyInput(state, pressBeat(state, 'good'));
       continue;
     }
 
@@ -2177,12 +2369,12 @@ function playOut(
     const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
 
     if (card && victim) {
-      state = applyInput(state, {
+      state = settleGood(applyInput(state, {
         type: 'play_card',
         instanceId: card.instanceId,
         atMs: 1000 + step,
         targetId: victim.id,
-      });
+      }));
     } else {
       state = applyInput(state, { type: 'end_turn', atMs: 2000 + step * 10 });
     }

@@ -77,10 +77,14 @@ _Avoid_: 起始牌组, preset
 
 **Execution Check**:
 Card 结算过程中插入的即时操作判定，其表现决定这次结算的强度。玩家的手上功夫在此进入 Encounter 的结果。每回合最多触发一次。
+
+三种原型共用同一条规则：**在若干个指定时刻各按一次**，按得多准决定档位。差别在按几次、按在哪——格挡按一次，节奏连击按三次，蓄力按两次且中间要忍住。容差是每个原型自己的：它不能宽到把相邻的拍子连成一片。
 _Avoid_: QTE, 小游戏, minigame
 
 **Execution Grade**:
 一次 Execution Check 的结果档位：Miss / Good / Perfect。Miss 只是打折，不会反噬。
+
+判定轴的三个 Atom 改的正是这一步，因此 Execution Check 是构筑的一部分而不是平行系统：`steady` 放宽窗口，`focus` 把 Perfect 的倍率从 1.5 提到 2.0，`reflex` 把 Miss 兜成 Good（但兜不出 Perfect）。手不稳的人堆前两者，手稳的人堆 `focus`——同一套牌，两种玩法。
 
 **Favor**:
 Encounter 结束后，由玩家留下来的那一方提供的报酬：若干张可选的 Card，外加替他处理伤口。给多少取决于这一方还剩几个人。分阶——高阶 Favor 不是给一张牌，而是给一次 Fusion 的机会，所以融合是忠诚的回报，不是随手可得的东西。
