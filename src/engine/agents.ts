@@ -362,6 +362,8 @@ export function legalTargetsFor(
 ): readonly string[] {
   // 打谁由 kind 推出，不另存一个可能与它矛盾的字段：防御只作用于自己。
   if (action.kind !== 'attack') return [];
+  // 围攻：各方暂时联手，这一场里它们只打你。
+  if (state.encounter.siege) return [PLAYER_TARGET];
   return [
     PLAYER_TARGET,
     ...state.encounter.combatants

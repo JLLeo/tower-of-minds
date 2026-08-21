@@ -7,6 +7,7 @@ import {
   remember,
   rememberCardPlayed,
   sidedWith,
+  standingOf,
 } from './memory.js';
 import {
   dropRequests,
@@ -29,6 +30,7 @@ import {
   PLAYER_MAX_HP,
   STARTING_DECK,
   baseCardsOf,
+  bossFloorCombatants,
   builtInAgents,
   combatantsForFloor,
 } from './content.js';
@@ -98,6 +100,13 @@ function mintCard(definitionId: string, seq: number): CardInstance {
   return { instanceId: `${definitionId}#${seq}`, definitionId };
 }
 
+/** 这一层站着谁：普通层是当层的名册，塔顶按当时的 Standing 结算。 */
+function fieldFor(state: RunState, floor: number): readonly CombatantState[] {
+  if (!isBossFloor(floor)) return combatantsForFloor(floor, offendedFactions(state));
+  const top = topOfTower(state);
+  return bossFloorCombatants(top.bossFactionId, top.allies);
+}
+
 /** 还没有 Encounter 时的占位。startRun 立刻会用真正的第一层覆盖它。 */
 const EMPTY_ENCOUNTER: EncounterState = {
   turn: 0,
@@ -116,6 +125,7 @@ const EMPTY_ENCOUNTER: EncounterState = {
   combatants: [],
   pending: null,
   damageDealtTo: {},
+  siege: false,
   executionUsedThisTurn: false,
   lastGrade: null,
 };
@@ -148,22 +158,22 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
       favor: null,
       phase: 'in_encounter',
       journal: [...state.journal, `第 ${floor} 层。`],
-      // 层间备好的牌在这里兑现：它学会的东西变成多出来的动作。没答上来就按预设走。
+      // 层间备好的牌在这里兑现：它学会的东西变成多出来的动作。没答上来就什么都不带。
       factionDecks: {},
       encounter: {
         turn: 1,
         phase: 'player_turn',
         player,
-        combatants: combatantsForFloor(floor, offendedFactions(state)).map((combatant) => ({
+        combatants: fieldFor(state, floor).map((combatant) => ({
           ...combatant,
           actions: [
             ...combatant.actions,
-            // 没问过就什么都没带。预设是「答不上来」的兜底，不是开局的默认。
             ...extraActionsFor(state, state.factionDecks[combatant.factionId] ?? []),
           ],
         })),
         pending: null,
         damageDealtTo: {},
+        siege: isBossFloor(floor) ? topOfTower(state).siege : false,
         executionUsedThisTurn: false,
         lastGrade: null,
       },
@@ -306,6 +316,32 @@ export function memoryOf(state: RunState, factionId: string): readonly MemoryEnt
 /** 每个 Faction 对玩家的态度，由 Memory 推出。界面与 prompt 都读它。 */
 export function standings(state: RunState): Readonly<Record<string, number>> {
   return allStandings(state);
+}
+
+/** 第几层是塔顶。走到这里才结算 Boss——不是 Run 开始时预定的（ADR-0008）。 */
+export function isBossFloor(floor: number): boolean {
+  return floor > NORMAL_FLOORS;
+}
+
+/**
+ * 塔顶等着你的是谁：Standing 最低的那一方的首领。
+ * Standing 为正的派系派援军；一个正的都没有，就是所有人一起上。
+ */
+export function topOfTower(state: RunState): {
+  bossFactionId: string;
+  allies: readonly string[];
+  siege: boolean;
+} {
+  const scored = state.agents
+    .map((agent) => ({ factionId: agent.factionId, standing: standingOf(state, agent.factionId) }))
+    .sort((a, b) => a.standing - b.standing);
+
+  const boss = scored[0]?.factionId ?? state.agents[0]?.factionId ?? '';
+  const allies = scored
+    .filter((entry) => entry.factionId !== boss && entry.standing > 0)
+    .map((entry) => entry.factionId);
+
+  return { bossFactionId: boss, allies, siege: allies.length === 0 };
 }
 
 /** 玩家没有指定目标时打谁。渲染层读它来高亮，不自己再推一遍。 */
@@ -817,6 +853,20 @@ function checkOutcome(state: RunState): RunState {
     };
   }
 
+  // 塔顶的规矩不一样：首领倒下这一场就结束，不管旁边还站着谁。
+  if (isBossFloor(state.floor)) {
+    const boss = encounter.combatants.find((combatant) => combatant.isBoss);
+    if (!boss || boss.hp <= 0) {
+      return clearFloor({
+        ...state,
+        agentRequests: [],
+        encounter: { ...encounter, phase: 'ended', pending: null },
+        journal: [...state.journal, `${boss?.name ?? '塔顶那位'}倒下了。`],
+      });
+    }
+    return state;
+  }
+
   // 玩家活着离开这一层：场上不再有两个敌对 Faction 同时存在，剩下的那一方放你过去。
   // 不需要清场——你可以刻意留某一方活着。
   const living = encounter.combatants.filter((combatant) => combatant.hp > 0);
@@ -846,7 +896,8 @@ function checkOutcome(state: RunState): RunState {
  * choose_favor 会带着它进来。
  */
 function clearFloor(state: RunState): RunState {
-  if (state.floor >= NORMAL_FLOORS) {
+  // 塔顶清掉了才算走到尽头；第 5 层之后还有一层等着。
+  if (isBossFloor(state.floor)) {
     return {
       ...state,
       phase: 'ended',
@@ -854,7 +905,7 @@ function clearFloor(state: RunState): RunState {
       memories: {},
       forged: [],
       factionDecks: {},
-      journal: [...state.journal, '你走到了塔的尽头。'],
+      journal: [...state.journal, '塔顶安静了下来。你走到了尽头。'],
     };
   }
 

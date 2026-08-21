@@ -88,7 +88,7 @@ function header(state: RunState): HTMLElement {
     el(
       'span',
       undefined,
-      `Tower of Minds — 第 ${state.floor}/${NORMAL_FLOORS} 层 · 回合 ${state.encounter.turn}` +
+      `Tower of Minds — ${state.floor > NORMAL_FLOORS ? '塔顶' : `第 ${state.floor}/${NORMAL_FLOORS} 层`} · 回合 ${state.encounter.turn}` +
         (standing ? `　|　态度：${standing}` : ''),
     ),
   );

@@ -78,6 +78,8 @@ export interface CombatantState {
   readonly actions: readonly CombatantAction[];
   readonly intent: Intent | null;
   readonly statuses: Statuses;
+  /** 塔顶那一位。它倒下这一局就结束了。 */
+  readonly isBoss?: true;
 }
 
 /**
@@ -261,6 +263,11 @@ export interface EncounterState {
    * 就是站在谁的对面。Standing 与跨层的累积在 #8 落地。
    */
   readonly damageDealtTo: Readonly<Record<string, number>>;
+  /**
+   * 围攻：所有人都得罪光了，塔顶的各方暂时联手对付你。
+   * 这一场里它们只打你，彼此之间不再动手。
+   */
+  readonly siege: boolean;
   /** ADR-0002：每回合最多触发一次 Execution Check。 */
   readonly executionUsedThisTurn: boolean;
   /** 本回合最近一次判定的结果，供界面当场反馈。新回合清空。 */

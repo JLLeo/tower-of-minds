@@ -205,6 +205,101 @@ export function combatantsForFloor(
   return field;
 }
 
+interface LeaderTemplate {
+  readonly id: string;
+  readonly name: string;
+  readonly hp: number;
+  readonly actions: readonly CombatantAction[];
+}
+
+/** 每个 Faction 的首领。塔顶等着你的就是其中之一（ADR-0008）。 */
+const LEADERS: Readonly<Record<string, LeaderTemplate>> = {
+  'red-ring': {
+    id: 'red-warden',
+    name: '赤环执刑官',
+    hp: 78,
+    actions: [
+      { id: 'cleave', kind: 'attack', amount: 12, description: '横扫，造成 12 点伤害' },
+      { id: 'execute', kind: 'attack', amount: 18, description: '行刑一击，造成 18 点伤害' },
+      { id: 'aegis', kind: 'defend', amount: 10, description: '立盾，获得 10 点格挡' },
+    ],
+  },
+  'green-vine': {
+    id: 'vine-matron',
+    name: '青蔓主事',
+    hp: 72,
+    actions: [
+      { id: 'strangle', kind: 'attack', amount: 11, description: '绞缠，造成 11 点伤害' },
+      { id: 'harvest', kind: 'attack', amount: 16, description: '收割，造成 16 点伤害' },
+      { id: 'bulwark', kind: 'defend', amount: 12, description: '藤墙，获得 12 点格挡' },
+    ],
+  },
+};
+
+/**
+ * 塔顶的场面。Boss 是你 Standing 最低的那一方的首领——难度是你自己填的期末试卷。
+ *
+ * allies 里的 Faction 会派人来帮你打它；siege 为真时所有人联手对付你。
+ */
+export function bossFloorCombatants(
+  bossFactionId: string,
+  allies: readonly string[],
+): readonly CombatantState[] {
+  const leader = LEADERS[bossFactionId];
+  const field: CombatantState[] = [];
+
+  if (leader) {
+    field.push({
+      id: leader.id,
+      name: leader.name,
+      factionId: bossFactionId,
+      hp: leader.hp,
+      maxHp: leader.hp,
+      block: 0,
+      actions: leader.actions,
+      intent: null,
+      statuses: NO_STATUSES,
+      isBoss: true,
+    });
+  }
+
+  // 首领不是一个人来的。
+  const escort = ROSTER.find((t) => t.factionId === bossFactionId);
+  if (escort) {
+    const hp = Math.round(escort.hp * 1.4);
+    field.push({
+      id: `${escort.id}-escort`,
+      name: `${escort.name}（亲随）`,
+      factionId: bossFactionId,
+      hp,
+      maxHp: hp,
+      block: 0,
+      actions: escort.actions,
+      intent: null,
+      statuses: NO_STATUSES,
+    });
+  }
+
+  for (const allyId of allies) {
+    const template = ROSTER.find((t) => t.factionId === allyId);
+    if (!template) continue;
+    const hp = Math.round(template.hp * 1.2);
+    field.push({
+      id: `${template.id}-ally`,
+      name: `${template.name}（援军）`,
+      factionId: allyId,
+      hp,
+      maxHp: hp,
+      block: 0,
+      actions: template.actions,
+      intent: null,
+      statuses: NO_STATUSES,
+    });
+  }
+
+  return field;
+}
+
 /** 每个 Faction 自己的 Base Card，Favor 从这里给。 */
 export function baseCardsOf(factionId: string): readonly CardDefinition[] {
   return CARD_POOL.filter((card) => card.faction === factionId);

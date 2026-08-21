@@ -5,13 +5,14 @@ import {
   definitionOf,
   currentSiding,
   cardById,
+  isBossFloor,
   isPlayerActing,
   memoryOf,
   standings,
   startRun,
 } from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
-import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
+import { BUILT_IN_GENERATION, CARD_POOL, NORMAL_FLOORS, STARTING_DECK } from './content.js';
 import { PLAYER_TARGET } from './types.js';
 import type { DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
@@ -149,12 +150,15 @@ function playAndResolve(state: RunState, definitionId: string): RunState {
   return applyInput(suspended, pressAt(suspended, 0.5));
 }
 
-/** 每个 Combatant 的自守动作，用来让不相干的单位安静地过掉这一回合。 */
-const DEFEND: Readonly<Record<string, string>> = {
-  'tower-guard': 'brace',
-  'red-archer': 'retreat',
-  'vine-scout': 'coil',
-};
+/**
+ * 让某个 Combatant 安静地过掉这一回合：用它自己的防御动作。
+ * 不写死一张 id 表——塔顶的首领、亲随、援军都不在那张表里，写死会让它们全部回退成打玩家。
+ */
+function defendPayload(state: RunState, combatantId: string): unknown {
+  const combatant = state.encounter.combatants.find((c) => c.id === combatantId);
+  const defend = combatant?.actions.find((a) => a.kind === 'defend');
+  return defend ? { actionId: defend.id, line: '' } : { actionId: 'none' };
+}
 
 /** 只挑战斗提问。融合提问是另一种 kind，测试里另外处理。 */
 function intentRequestsOf(state: RunState): readonly IntentRequest[] {
@@ -179,12 +183,12 @@ function answerAll(
 
 /** 全员自守：把场面安静下来，好断言某一件事。 */
 function allDefend(state: RunState): RunState {
-  return answerAll(state, (id) => ({ actionId: DEFEND[id], line: '' }));
+  return answerAll(state, (id) => defendPayload(state, id));
 }
 
 /** 除了 except 全员自守，except 按给定的方式行动。 */
 function onlyOneActs(state: RunState, except: string, payload: unknown): RunState {
-  return answerAll(state, (id) => (id === except ? payload : { actionId: DEFEND[id], line: '' }));
+  return answerAll(state, (id) => (id === except ? payload : defendPayload(state, id)));
 }
 
 function run(inputs: readonly PlayerInput[], options?: RunOptions): RunState {
@@ -978,13 +982,13 @@ describe('多方混战与站队', () => {
 
     // 塔卫想打同派的弓手
     const sameFaction = answerAll(state, (id) =>
-      id === GUARD ? { actionId: 'slash', targetId: ARCHER, line: '' } : { actionId: DEFEND[id] },
+      id === GUARD ? { actionId: 'slash', targetId: ARCHER, line: '' } : defendPayload(state, id),
     );
     expect(at(sameFaction, GUARD).intent?.source).toBe('fallback');
 
     // 目标根本不存在
     const ghost = answerAll(state, (id) =>
-      id === GUARD ? { actionId: 'slash', targetId: '幽灵', line: '' } : { actionId: DEFEND[id] },
+      id === GUARD ? { actionId: 'slash', targetId: '幽灵', line: '' } : defendPayload(state, id),
     );
     expect(at(ghost, GUARD).intent?.source).toBe('fallback');
   });
@@ -1032,8 +1036,8 @@ describe('多方混战与站队', () => {
       state = allDefend(state);
       while (state.encounter.phase === 'player_turn') {
         const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-        const victim = state.encounter.combatants.find(
-          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        const victim = state.encounter.combatants.find((c) =>
+          isBossFloor(state.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
         state = applyInput(state, {
@@ -1078,8 +1082,8 @@ describe('多方混战与站队', () => {
       state = allDefend(state);
       while (state.encounter.phase === 'player_turn') {
         const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-        const victim = state.encounter.combatants.find(
-          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        const victim = state.encounter.combatants.find((c) =>
+          isBossFloor(state.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
         state = applyInput(state, {
@@ -1108,14 +1112,12 @@ describe('多 Floor 推进与 Favor', () => {
   function clearFloorOne(state: RunState): RunState {
     let next = state;
     for (let turn = 0; turn < 30 && next.phase === 'in_encounter'; turn++) {
-      next = answerAll(next, (id) => ({
-        actionId: DEFEND[id.replace('-reinforcement', '')],
-        line: '',
-      }));
+      next = allDefend(next);
       while (next.encounter.phase === 'player_turn') {
         const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
-        const victim = next.encounter.combatants.find(
-          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        // 塔顶只认首领；普通层打青蔓这一派。
+        const victim = next.encounter.combatants.find((c) =>
+          isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
         next = applyInput(next, {
@@ -1248,14 +1250,12 @@ describe('Memory 与 Standing', () => {
   function clearFloor(state: RunState): RunState {
     let next = state;
     for (let turn = 0; turn < 30 && next.phase === 'in_encounter'; turn++) {
-      next = answerAll(next, (id) => ({
-        actionId: DEFEND[id.replace('-reinforcement', '')],
-        line: '',
-      }));
+      next = allDefend(next);
       while (next.encounter.phase === 'player_turn') {
         const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
-        const victim = next.encounter.combatants.find(
-          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        // 塔顶只认首领；普通层打青蔓这一派。
+        const victim = next.encounter.combatants.find((c) =>
+          isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
         next = applyInput(next, {
@@ -1336,8 +1336,8 @@ describe('Memory 与 Standing', () => {
     let state = clearedOnce();
     expect(memoryOf(state, 'red-ring').length).toBeGreaterThan(0);
 
-    // 一路走到最后一层并清掉它
-    for (let floor = 1; floor < 5 && state.phase !== 'ended'; floor++) {
+    // 一路走到塔顶并把首领放倒
+    for (let floor = 1; floor < 8 && state.phase !== 'ended'; floor++) {
       state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 * floor });
       state = clearFloor(state);
     }
@@ -1423,14 +1423,12 @@ describe('Fusion 与 Mutation', () => {
   function clearFloor(state: RunState): RunState {
     let next = state;
     for (let turn = 0; turn < 40 && next.phase === 'in_encounter'; turn++) {
-      next = answerAll(next, (id) => ({
-        actionId: DEFEND[id.replace('-reinforcement', '')],
-        line: '',
-      }));
+      next = allDefend(next);
       while (next.encounter.phase === 'player_turn') {
         const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
-        const victim = next.encounter.combatants.find(
-          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        // 塔顶只认首领；普通层打青蔓这一派。
+        const victim = next.encounter.combatants.find((c) =>
+          isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
         next = applyInput(next, {
@@ -1684,7 +1682,7 @@ describe('Fusion 与 Mutation', () => {
     state = fuse(state, mine.instanceId, false, 30_000);
     expect(state.forged.length).toBeGreaterThan(0);
 
-    for (let floor = 2; floor < 6 && state.phase !== 'ended'; floor++) {
+    for (let floor = 2; floor < 9 && state.phase !== 'ended'; floor++) {
       state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 40_000 * floor });
       state = clearFloor(state);
     }
@@ -1702,14 +1700,12 @@ describe('对手也在构筑', () => {
   function clearFloor(state: RunState): RunState {
     let next = state;
     for (let turn = 0; turn < 40 && next.phase === 'in_encounter'; turn++) {
-      next = answerAll(next, (id) => ({
-        actionId: DEFEND[id.replace('-reinforcement', '')],
-        line: '',
-      }));
+      next = allDefend(next);
       while (next.encounter.phase === 'player_turn') {
         const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
-        const victim = next.encounter.combatants.find(
-          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        // 塔顶只认首领；普通层打青蔓这一派。
+        const victim = next.encounter.combatants.find((c) =>
+          isBossFloor(next.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
         next = applyInput(next, {
@@ -1787,16 +1783,13 @@ describe('对手也在构筑', () => {
     });
 
     for (let turn = 0; turn < 40 && state.phase === 'in_encounter'; turn++) {
-      state = answerAll(state, (id) => ({
-        actionId: DEFEND[id.replace('-reinforcement', '')],
-        line: '',
-      }));
+      state = allDefend(state);
       while (state.encounter.phase === 'player_turn') {
         const card = state.encounter.player.hand.find(
           (c) => c.instanceId.startsWith('strike#') && canPlay(state, c.instanceId),
         );
-        const victim = state.encounter.combatants.find(
-          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        const victim = state.encounter.combatants.find((c) =>
+          isBossFloor(state.floor) ? c.isBoss && c.hp > 0 : c.hp > 0 && c.factionId === 'green-vine',
         );
         if (!card || !victim) break;
         state = applyInput(state, {
@@ -1905,5 +1898,158 @@ describe('对手也在构筑', () => {
     expect(state.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(false);
     const guard = state.encounter.combatants.find((c) => c.id === 'tower-guard')!;
     expect(guard.actions.filter((a) => a.id.startsWith('card:'))).toHaveLength(0);
+  });
+});
+
+describe('Boss 层（ADR-0008）', () => {
+  const fresh = (options?: RunOptions): RunState =>
+    startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+
+  /** 直接把 Run 摆到塔顶前一刻，Standing 由这份 memories 决定。 */
+  function atTop(memories: RunState['memories']): RunState {
+    const base = fresh(deckOf('strike'));
+    const before: RunState = { ...base, floor: NORMAL_FLOORS, memories };
+    // 走一次正常的层间流程上塔顶
+    const cleared: RunState = {
+      ...before,
+      phase: 'choosing_favor',
+      favor: { factionId: 'red-ring', tier: 'basic', choices: [] },
+    };
+    return applyInput(cleared, { type: 'choose_favor', cardId: null, atMs: 60_000 });
+  }
+
+  const bossOf = (state: RunState): CombatantState | undefined =>
+    state.encounter.combatants.find((c) => c.isBoss);
+
+  it('塔顶坐着的是你 Standing 最低的那一方的首领', () => {
+    // 得罪青蔓：它的首领在等你
+    const angryGreen = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'sided', floor: 1 }],
+    });
+    expect(isBossFloor(angryGreen.floor)).toBe(true);
+    expect(bossOf(angryGreen)?.factionId).toBe('green-vine');
+
+    // 反过来得罪赤环，塔顶就换了人——同一个 Run 结构，不同的结局
+    const angryRed = atTop({
+      'red-ring': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'green-vine': [{ kind: 'sided', floor: 1 }],
+    });
+    expect(bossOf(angryRed)?.factionId).toBe('red-ring');
+  });
+
+  it('Standing 为正的那一方派援军来帮你', () => {
+    const state = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'sided', floor: 1 }, { kind: 'sided', floor: 2 }],
+    });
+
+    const allies = state.encounter.combatants.filter((c) => c.factionId === 'red-ring');
+    expect(allies.length).toBeGreaterThan(0);
+    expect(state.encounter.siege).toBe(false);
+
+    // 援军和首领不是一伙的：让它去打首领，引擎应当认这个目标
+    const ally = allies[0]!;
+    const attack = ally.actions.find((a) => a.kind === 'attack')!;
+    const boss = bossOf(state)!;
+    const answered = answerAll(state, (id) =>
+      id === ally.id
+        ? { actionId: attack.id, targetId: boss.id, line: '' }
+        : defendPayload(state, id),
+    );
+    const decided = answered.encounter.combatants.find((c) => c.id === ally.id)!;
+    expect(decided.intent?.source).toBe('agent');
+    expect(decided.intent?.targetId).toBe(boss.id);
+  });
+
+  it('谁都得罪光了就是围攻：所有人只打你，彼此不再动手', () => {
+    const state = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'harmed', floor: 1, amount: 40 }],
+    });
+
+    expect(state.encounter.siege).toBe(true);
+
+    // 围攻期间它们只认玩家：给一个「打旁边那位」的目标，引擎应当拒绝并回退
+    const boss = bossOf(state)!;
+    const other = state.encounter.combatants.find((c) => c.id !== boss.id)!;
+    const attack = other.actions.find((a) => a.kind === 'attack')!;
+    const answered = answerAll(state, (id) =>
+      id === other.id
+        ? { actionId: attack.id, targetId: boss.id, line: '' }
+        : defendPayload(state, id),
+    );
+    const decided = answered.encounter.combatants.find((c) => c.id === other.id)!;
+    expect(decided.intent?.source).toBe('fallback');
+    expect(decided.intent?.targetId).toBe(PLAYER_TARGET);
+  });
+
+  it('首领带着这一派备好的牌上来', () => {
+    const before = atTop({ 'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }] });
+    expect(bossOf(before)?.factionId).toBe('green-vine');
+
+    // 让青蔓在上塔顶之前备好一张牌
+    const base = fresh(deckOf('strike'));
+    const staged: RunState = {
+      ...base,
+      floor: NORMAL_FLOORS,
+      memories: { 'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }] },
+      factionDecks: { 'green-vine': ['guard', 'bramble'] },
+      phase: 'choosing_favor',
+      favor: { factionId: 'green-vine', tier: 'basic', choices: [] },
+    };
+    const top = applyInput(staged, { type: 'choose_favor', cardId: null, atMs: 60_000 });
+
+    const boss = bossOf(top)!;
+    expect(boss.actions.some((a) => a.id === 'card:guard')).toBe(true);
+
+    // 但它拿到的是那张牌的骨架，不是全部：Combatant 的动作只有攻击和防御两种形状，
+    // 反伤这类附带效果搬不过去，所以只有反伤的荆棘不会变成任何动作。
+    expect(boss.actions.some((a) => a.id === 'card:bramble')).toBe(false);
+  });
+
+  it('首领倒下这一场就结束，不管旁边还站着谁', () => {
+    let state = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'sided', floor: 1 }, { kind: 'sided', floor: 2 }],
+    });
+
+    for (let turn = 0; turn < 60 && state.phase === 'in_encounter'; turn++) {
+      state = allDefend(state);
+      while (state.encounter.phase === 'player_turn') {
+        const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
+        const boss = bossOf(state);
+        if (!card || !boss || boss.hp <= 0) break;
+        state = applyInput(state, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: boss.id,
+        });
+      }
+      if (state.phase !== 'in_encounter') break;
+      state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+
+    expect(state.phase).toBe('ended');
+    expect(state.outcome).toBe('victory');
+    expect(bossOf(state)?.hp).toBe(0);
+    // 援军还活着，但这一场已经结束了
+    expect(state.encounter.combatants.some((c) => c.hp > 0 && !c.isBoss)).toBe(true);
+  });
+
+  it('在塔顶倒下也是正常结束', () => {
+    let state = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'harmed', floor: 1, amount: 40 }],
+    });
+    // 什么都不做，一路挨打
+    for (let turn = 0; turn < 40 && state.phase === 'in_encounter'; turn++) {
+      state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+
+    expect(state.phase).toBe('ended');
+    expect(state.outcome).toBe('defeat');
+    expect(state.encounter.player.hp).toBe(0);
   });
 });
