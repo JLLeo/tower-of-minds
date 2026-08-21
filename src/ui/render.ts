@@ -12,7 +12,13 @@ import {
   isPlayerActing,
 } from '../engine/run.js';
 import { MAX_ATOMS_PER_CARD, atomGlyphs, describeAtoms } from '../engine/atoms.js';
-import { NORMAL_FLOORS } from '../engine/content.js';
+import { CARD_POOL, LOADOUT_SIZE, NORMAL_FLOORS } from '../engine/content.js';
+import {
+  defaultLoadout,
+  isLegalLoadout,
+  loadoutFactionsOf,
+  unlockedCardsOf,
+} from '../engine/unlocks.js';
 import { describeMemory, summarizeMemory } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { CardDefinition, PendingExecution, PlayerInput, RunState } from '../engine/types.js';
@@ -27,6 +33,10 @@ export interface View {
   readonly fuseOfferedId: string | null;
   readonly fuseDeckInstanceId: string | null;
   readonly onPickFuse: (offeredId: string | null, deckInstanceId: string | null) => void;
+  /** 进塔前正在组的那一副：挑中的 Faction，以及已经放进去的牌。 */
+  readonly loadoutFaction: string | null;
+  readonly loadoutPicks: readonly string[];
+  readonly onPickLoadout: (factionId: string | null, picks: readonly string[]) => void;
 }
 
 /** 上一次渲染留下的时机条动画与按键监听，下一次渲染前必须先拆掉。 */
@@ -47,6 +57,11 @@ export function render(
 ): void {
   stopTimingBar?.();
   stopTimingBar = null;
+
+  if (state.phase === 'loadout') {
+    root.replaceChildren(loadoutView(state, view, dispatch));
+    return;
+  }
 
   if (state.phase === 'generating') {
     root.replaceChildren(generatingView(state));
@@ -75,6 +90,93 @@ export function render(
       stopTimingBar = runTimingBar({ root, track, indicator }, pending, dispatch);
     }
   }
+}
+
+/**
+ * 进塔前组一副 Loadout。只能取自一个 Faction——你带着谁的牌进塔是你的第一次表态，
+ * 而它可能和你在塔里的站队打架。
+ *
+ * 这里只是界面：合不合法由引擎判（isLegalLoadout），非法的一副会被换成默认牌组。
+ */
+function loadoutView(state: RunState, view: View, dispatch: Dispatch): HTMLElement {
+  const section = el('section', 'favor');
+  section.appendChild(el('h2', undefined, '进塔前，组一副牌'));
+  section.appendChild(
+    el('p', 'favor-hint', `只能带一个派系的牌，共 ${LOADOUT_SIZE} 张，可以重复。`),
+  );
+
+  const factions = loadoutFactionsOf(state.ledger);
+  const picked = view.loadoutFaction ?? factions[0] ?? null;
+
+  const tabs = el('div', 'loadout-tabs');
+  for (const factionId of factions) {
+    const name = state.agents.find((a) => a.factionId === factionId)?.name ?? factionId;
+    const tab = el(
+      'button',
+      factionId === picked ? 'primary' : 'loadout-tab',
+      name,
+    ) as HTMLButtonElement;
+    // 换派系就得从头挑：混装的一副本来就不合法，留着上一派的牌只会骗人
+    tab.addEventListener('click', () => view.onPickLoadout(factionId, []));
+    tabs.appendChild(tab);
+  }
+  section.appendChild(tabs);
+
+  if (picked === null) {
+    section.appendChild(el('p', 'favor-hint', '这个存档还没有解锁任何牌。'));
+    return section;
+  }
+
+  const counts = new Map<string, number>();
+  for (const id of view.loadoutPicks) counts.set(id, (counts.get(id) ?? 0) + 1);
+
+  const shelf = el('div', 'hand');
+  for (const cardId of unlockedCardsOf(state.ledger, picked)) {
+    const definition = CARD_POOL.find((card) => card.id === cardId);
+    if (!definition) continue;
+    const taken = counts.get(cardId) ?? 0;
+    const button = cardButton(definition, taken > 0);
+    if (taken > 0) button.appendChild(el('span', 'card-cost', `已带 ${taken} 张`));
+    button.disabled = view.loadoutPicks.length >= LOADOUT_SIZE;
+    button.addEventListener('click', () => {
+      view.onPickLoadout(picked, [...view.loadoutPicks, cardId]);
+    });
+    shelf.appendChild(button);
+  }
+  section.appendChild(shelf);
+
+  const bar = el('div', 'loadout-bar');
+  bar.appendChild(
+    el('span', 'favor-hint', `${view.loadoutPicks.length} / ${LOADOUT_SIZE}`),
+  );
+
+  const undo = el('button', 'loadout-tab', '撤一张') as HTMLButtonElement;
+  undo.disabled = view.loadoutPicks.length === 0;
+  undo.addEventListener('click', () => {
+    view.onPickLoadout(picked, view.loadoutPicks.slice(0, -1));
+  });
+  bar.appendChild(undo);
+
+  const fill = el('button', 'loadout-tab', '凑满') as HTMLButtonElement;
+  fill.disabled = view.loadoutPicks.length >= LOADOUT_SIZE;
+  fill.addEventListener('click', () => {
+    view.onPickLoadout(picked, defaultLoadout(state.ledger, picked));
+  });
+  bar.appendChild(fill);
+
+  const enter = el('button', 'primary', '进塔') as HTMLButtonElement;
+  enter.disabled = !isLegalLoadout(state.ledger, view.loadoutPicks);
+  enter.addEventListener('click', () => {
+    dispatch({
+      type: 'choose_loadout',
+      cardIds: view.loadoutPicks,
+      atMs: performance.now(),
+    });
+  });
+  bar.appendChild(enter);
+  section.appendChild(bar);
+
+  return section;
 }
 
 /** 塔还在成形。这一局的局势要先定下来，它整座塔通用。 */
@@ -545,6 +647,19 @@ function outcomeView(state: RunState, restart: () => void): HTMLElement {
   section.appendChild(
     el('h2', undefined, state.outcome === 'victory' ? '你活着离开了这一层' : '你倒在了塔里'),
   );
+  // 这一趟挣到的解锁：跨 Run 唯一带得走的东西，也是再开一局的理由。
+  if (state.earnedUnlocks.length > 0) {
+    section.appendChild(
+      el(
+        'p',
+        'favor-hint',
+        `你学会了：${state.earnedUnlocks
+          .map((id) => CARD_POOL.find((card) => card.id === id)?.name ?? id)
+          .join('、')}。下一局就能带进塔。`,
+      ),
+    );
+  }
+
   const again = document.createElement('button');
   again.className = 'primary';
   again.textContent = '再来一局';

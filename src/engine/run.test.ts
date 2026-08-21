@@ -12,10 +12,24 @@ import {
   startRun,
 } from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
-import { BUILT_IN_GENERATION, CARD_POOL, NORMAL_FLOORS, STARTING_DECK } from './content.js';
+import {
+  BUILT_IN_GENERATION,
+  CARD_POOL,
+  GENERATION_TIMEOUT_MS,
+  LOADOUT_SIZE,
+  NORMAL_FLOORS,
+  STARTING_DECK,
+} from './content.js';
+import {
+  NEW_SAVE_LEDGER,
+  defaultLoadout,
+  isLegalLoadout,
+  unlocksForFavoring,
+  unlocksForFelling,
+} from './unlocks.js';
 import { PLAYER_TARGET } from './types.js';
 import type { AgentRequest, DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
-import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
+import type { CombatantState, PlayerInput, RunOptions, RunState, UnlockLedger } from './types.js';
 
 const SEED = 20260818;
 
@@ -24,7 +38,11 @@ const SEED = 20260818;
  * 局势是叙事，绝大多数断言不关心它，但每条测试都去等它会把噪音铺满整个文件。
  */
 function beginRun(seed: number, options: RunOptions = {}): RunState {
-  return startRun(BUILT_IN_GENERATION, seed, { skipGeneration: true, ...options });
+  return startRun(BUILT_IN_GENERATION, seed, {
+    skipGeneration: true,
+    startingDeck: STARTING_DECK,
+    ...options,
+  });
 }
 
 const ALL_GUARDS: RunOptions = { startingDeck: Array.from({ length: 10 }, () => 'guard') };
@@ -455,7 +473,9 @@ describe('完整一场', () => {
     const state = run(scriptInputs(beginRun(SEED)));
 
     expect(state.phase).toBe('ended');
-    expect(state.floor).toBe(5); // 一路推到了最后一层
+    // 走得够深，好让 Deck 真的累积起来。**不**断言走到第几层：那是平衡，
+    // 会随卡池的每一次改动漂移。整座塔走通由「一局完整的塔」那条测试盯着。
+    expect(state.floor).toBeGreaterThanOrEqual(3);
     // Deck 跨层累积，且多出来的每一张都来自某个 Faction 的 Base Card
     expect(state.deck.length).toBeGreaterThan(STARTING_DECK.length);
     const startingCounts = new Map<string, number>();
@@ -2116,54 +2136,69 @@ describe('Boss 层（ADR-0008）', () => {
   });
 });
 
+/**
+ * 把一局从头打到底：能打就打，挂起就用完美时机接上，Favor 一律拿第一个选项。
+ * 打谁按 aimAt 决定——集火哪一派是 Standing 的唯一来源，测解锁时要能指定。
+ */
+function playOut(
+  start: RunState,
+  aimAt = 'green-vine',
+): { state: RunState; floorsSeen: number[]; bossFought: string } {
+  let state = start;
+  const floorsSeen: number[] = [];
+  let bossFought = '';
+
+  for (let step = 0; step < 4000 && state.phase !== 'ended'; step++) {
+    if (!floorsSeen.includes(state.floor)) floorsSeen.push(state.floor);
+
+    if (state.phase === 'choosing_favor') {
+      state = applyInput(state, {
+        type: 'choose_favor',
+        cardId: state.favor?.choices[0] ?? null,
+        atMs: 100_000 + step,
+      });
+      continue;
+    }
+    if (state.phase === 'fusing') {
+      state = applyInput(state, { type: 'tick', atMs: 200_000 + step * 100 });
+      continue;
+    }
+
+    state = allDefend(state);
+    if (state.encounter.phase === 'awaiting_execution') {
+      state = applyInput(state, pressAt(state, 0.75));
+      continue;
+    }
+
+    const boss = state.encounter.combatants.find((c) => c.isBoss && c.hp > 0);
+    if (boss) bossFought = boss.name;
+    const victim =
+      boss ?? state.encounter.combatants.find((c) => c.hp > 0 && c.factionId === aimAt);
+    const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
+
+    if (card && victim) {
+      state = applyInput(state, {
+        type: 'play_card',
+        instanceId: card.instanceId,
+        atMs: 1000 + step,
+        targetId: victim.id,
+      });
+    } else {
+      state = applyInput(state, { type: 'end_turn', atMs: 2000 + step * 10 });
+    }
+  }
+
+  return { state, floorsSeen, bossFought };
+}
+
 describe('一局完整的塔', () => {
   it('从 startRun 一路打到塔顶：五个普通 Floor 加一场首领战', () => {
-    let state = beginRun(SEED, {
-      startingDeck: Array.from({ length: 10 }, () => 'heavy'),
-      startedAtMs: 0,
-    });
-    const floorsSeen: number[] = [];
-    let bossFought = '';
-
-    for (let step = 0; step < 4000 && state.phase !== 'ended'; step++) {
-      if (!floorsSeen.includes(state.floor)) floorsSeen.push(state.floor);
-
-      if (state.phase === 'choosing_favor') {
-        state = applyInput(state, {
-          type: 'choose_favor',
-          cardId: state.favor?.choices[0] ?? null,
-          atMs: 100_000 + step,
-        });
-        continue;
-      }
-      if (state.phase === 'fusing') {
-        state = applyInput(state, { type: 'tick', atMs: 200_000 + step * 100 });
-        continue;
-      }
-
-      state = allDefend(state);
-      if (state.encounter.phase === 'awaiting_execution') {
-        state = applyInput(state, pressAt(state, 0.75));
-        continue;
-      }
-
-      const boss = state.encounter.combatants.find((c) => c.isBoss && c.hp > 0);
-      if (boss) bossFought = boss.name;
-      const victim =
-        boss ?? state.encounter.combatants.find((c) => c.hp > 0 && c.factionId === 'green-vine');
-      const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
-
-      if (card && victim) {
-        state = applyInput(state, {
-          type: 'play_card',
-          instanceId: card.instanceId,
-          atMs: 1000 + step,
-          targetId: victim.id,
-        });
-      } else {
-        state = applyInput(state, { type: 'end_turn', atMs: 2000 + step * 10 });
-      }
-    }
+    const { state, floorsSeen, bossFought } = playOut(
+      beginRun(SEED, {
+        startingDeck: Array.from({ length: 10 }, () => 'heavy'),
+        startedAtMs: 0,
+      }),
+    );
 
     expect(state.phase).toBe('ended');
     expect(state.outcome).toBe('victory');
@@ -2179,7 +2214,10 @@ describe('一局完整的塔', () => {
 describe('开局的局势', () => {
   /** 真正走生成那条路：不跳过，从「塔在成形」开始。 */
   function generating(seed = SEED): RunState {
-    return startRun(BUILT_IN_GENERATION, seed, { startedAtMs: 0 });
+    return startRun(BUILT_IN_GENERATION, seed, {
+      startedAtMs: 0,
+      startingDeck: STARTING_DECK,
+    });
   }
 
   function generationRequestOf(state: RunState): AgentRequest {
@@ -2301,5 +2339,169 @@ describe('开局的局势', () => {
 
     expect(b.encounter.combatants).toEqual(a.encounter.combatants);
     expect(b.encounter.player.hand).toEqual(a.encounter.player.hand);
+  });
+});
+
+describe('Loadout 与 Unlock Ledger', () => {
+  /** 真正走 Loadout 那条路：不给 startingDeck，从「还没进塔」开始。 */
+  function atGate(ledger = NEW_SAVE_LEDGER, seed = SEED): RunState {
+    return startRun(BUILT_IN_GENERATION, seed, { startedAtMs: 0, ledger });
+  }
+
+  /** 组好这一副，再让局势超时，塔就开门了。 */
+  function enterWith(state: RunState, cardIds: readonly string[]): RunState {
+    const chosen = applyInput(state, { type: 'choose_loadout', cardIds, atMs: 10 });
+    return applyInput(chosen, { type: 'tick', atMs: GENERATION_TIMEOUT_MS + 100 });
+  }
+
+  const RED_TEN = Array.from({ length: LOADOUT_SIZE }, () => 'strike');
+  const GREEN_TEN = Array.from({ length: LOADOUT_SIZE }, () => 'guard');
+
+  it('新档只解锁基础牌：组合牌与 Parley 都还没有', () => {
+    for (const id of NEW_SAVE_LEDGER.cardIds) {
+      const card = CARD_POOL.find((c) => c.id === id)!;
+      expect(card.atoms).toHaveLength(1);
+      expect(card.atoms).not.toContain('parley');
+    }
+    // 每一派都得拿得出攻与守两条轴，否则单派系的 Loadout 组不出能打的牌
+    for (const factionId of ['red-ring', 'green-vine']) {
+      const mine = CARD_POOL.filter(
+        (c) => c.faction === factionId && NEW_SAVE_LEDGER.cardIds.includes(c.id),
+      );
+      expect(mine.some((c) => c.type === 'attack')).toBe(true);
+      expect(mine.some((c) => c.type === 'shield')).toBe(true);
+    }
+  });
+
+  it('没组 Loadout 就不进塔，但局势已经在问了', () => {
+    const state = atGate();
+
+    expect(state.phase).toBe('loadout');
+    expect(state.floor).toBe(0);
+    expect(state.deck).toHaveLength(0);
+    // 两件事并行：玩家挑牌的这几秒正好把生成的延迟盖掉
+    expect(state.agentRequests.some((r) => r.kind === 'generation')).toBe(true);
+  });
+
+  it('组好了就进塔，Deck 就是你带的那一副', () => {
+    const state = enterWith(atGate(), RED_TEN);
+
+    expect(state.phase).toBe('in_encounter');
+    expect(state.floor).toBe(1);
+    expect(state.deck.map((c) => c.definitionId)).toEqual(RED_TEN);
+    expect(new Set(state.deck.map((c) => c.instanceId)).size).toBe(LOADOUT_SIZE);
+  });
+
+  it('跨了 Faction 的一副不算数——那正是这条约束要挡的取舍', () => {
+    const mixed = [...RED_TEN.slice(0, 5), ...GREEN_TEN.slice(0, 5)];
+    const state = enterWith(atGate(), mixed);
+
+    expect(isLegalLoadout(NEW_SAVE_LEDGER, mixed)).toBe(false);
+    const factions = new Set(
+      state.deck.map((c) => CARD_POOL.find((card) => card.id === c.definitionId)?.faction),
+    );
+    expect(factions.size).toBe(1);
+    expect(state.phase).toBe('in_encounter'); // Run 不会因为一副烂牌停下
+  });
+
+  it('没解锁的牌带不进去', () => {
+    const locked = Array.from({ length: LOADOUT_SIZE }, () => 'heavy'); // 组合牌，新档没有
+    expect(NEW_SAVE_LEDGER.cardIds).not.toContain('heavy');
+
+    const state = enterWith(atGate(), locked);
+    expect(state.deck.every((c) => c.definitionId !== 'heavy')).toBe(true);
+    expect(state.deck).toHaveLength(LOADOUT_SIZE);
+  });
+
+  it('张数不对也不算数', () => {
+    expect(isLegalLoadout(NEW_SAVE_LEDGER, RED_TEN.slice(0, 3))).toBe(false);
+    const state = enterWith(atGate(), RED_TEN.slice(0, 3));
+    expect(state.deck).toHaveLength(LOADOUT_SIZE);
+  });
+
+  it('Loadout 只组一次：进塔之后再递一副没有用', () => {
+    const state = enterWith(atGate(), RED_TEN);
+    const meddled = applyInput(state, {
+      type: 'choose_loadout',
+      cardIds: GREEN_TEN,
+      atMs: 50_000,
+    });
+
+    expect(meddled).toBe(state);
+  });
+
+  it('解锁得多，能带的就多——不同的 Ledger 驱动出不同的一局', () => {
+    const wide: UnlockLedger = { cardIds: CARD_POOL.map((c) => c.id) };
+    const heavies = Array.from({ length: LOADOUT_SIZE }, () => 'heavy');
+
+    expect(isLegalLoadout(wide, heavies)).toBe(true);
+    const state = enterWith(atGate(wide), heavies);
+    expect(state.deck.map((c) => c.definitionId)).toEqual(heavies);
+
+    const { state: ended, floorsSeen } = playOut(state);
+    expect(ended.phase).toBe('ended');
+    expect(floorsSeen).toContain(1);
+  });
+
+  it('通关才教你东西：站过队的那一派给组合牌，被你打倒的首领给 Parley', () => {
+    // 一路集火青蔓：赤环因此欠你人情，青蔓则坐上塔顶等你
+    const { state } = playOut(
+      beginRun(SEED, { startingDeck: Array.from({ length: 10 }, () => 'heavy') }),
+      'green-vine',
+    );
+
+    expect(state.outcome).toBe('victory');
+    expect(state.earnedUnlocks.length).toBeGreaterThan(0);
+    // 站过队的那一派教你它的组合牌
+    expect(state.earnedUnlocks).toEqual(
+      expect.arrayContaining([...unlocksForFavoring('red-ring')]),
+    );
+    // 被你打倒的首领那一派，肯跟你谈了
+    expect(state.earnedUnlocks).toEqual(
+      expect.arrayContaining([...unlocksForFelling('green-vine')]),
+    );
+    // 挣到的都进了 Ledger，一张不落
+    for (const id of state.earnedUnlocks) expect(state.ledger.cardIds).toContain(id);
+    // 已经有的不重复记
+    expect(new Set(state.ledger.cardIds).size).toBe(state.ledger.cardIds.length);
+  });
+
+  it('死在塔里什么也带不走：Ledger 原样不动', () => {
+    let state = enterWith(atGate(), RED_TEN);
+    // 什么都不做，一路挨打。提问一超时，全场都回退成打你。
+    for (let turn = 0; turn < 200 && state.phase !== 'ended'; turn++) {
+      state = applyInput(state, { type: 'end_turn', atMs: 100_000 + 1000 * turn });
+    }
+
+    expect(state.outcome).toBe('defeat');
+    expect(state.earnedUnlocks).toHaveLength(0);
+    expect(state.ledger.cardIds).toEqual(NEW_SAVE_LEDGER.cardIds);
+  });
+
+  it('融合的产物进不了 Ledger：跨 Run 带走的只有 Base Card', () => {
+    const won = playOut(
+      beginRun(SEED, { startingDeck: Array.from({ length: 10 }, () => 'heavy') }),
+    ).state;
+
+    expect(won.outcome).toBe('victory');
+    for (const id of won.ledger.cardIds) {
+      expect(CARD_POOL.some((card) => card.id === id)).toBe(true);
+    }
+  });
+
+  it('默认牌组要能打：主力是最便宜的攻与最便宜的守，不是把解锁的牌摊平', () => {
+    // 摊平组出来的一副实测比有意组的少撑一整层。这条盯着它别退回去。
+    for (const factionId of ['red-ring', 'green-vine']) {
+      const deck = defaultLoadout(NEW_SAVE_LEDGER, factionId);
+      const types = deck.map((id) => CARD_POOL.find((card) => card.id === id)!.type);
+      expect(types.filter((t) => t === 'attack').length).toBeGreaterThanOrEqual(5);
+      expect(types.filter((t) => t === 'shield').length).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  it('默认牌组是确定性的：同一个 Ledger 永远得到同一副', () => {
+    expect(defaultLoadout(NEW_SAVE_LEDGER)).toEqual(defaultLoadout(NEW_SAVE_LEDGER));
+    expect(defaultLoadout(NEW_SAVE_LEDGER)).toHaveLength(LOADOUT_SIZE);
+    expect(isLegalLoadout(NEW_SAVE_LEDGER, defaultLoadout(NEW_SAVE_LEDGER))).toBe(true);
   });
 });
