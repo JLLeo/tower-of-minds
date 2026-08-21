@@ -16,6 +16,7 @@ import {
   BUILT_IN_GENERATION,
   CARD_POOL,
   GENERATION_TIMEOUT_MS,
+  combatantsForFloor,
   LOADOUT_SIZE,
   NORMAL_FLOORS,
   STARTING_DECK,
@@ -238,6 +239,13 @@ function defendPayload(state: RunState, combatantId: string): unknown {
   return defend ? { actionId: defend.id, line: '' } : { actionId: 'none' };
 }
 
+/** 场上第一个人某个动作的数值。名册的数字会变，规则不会。 */
+function amountOf(state: RunState, actionId: string): number {
+  const action = state.encounter.combatants[0]?.actions.find((a) => a.id === actionId);
+  if (!action) throw new Error('没有这个动作：' + actionId);
+  return action.amount;
+}
+
 /** 只挑战斗提问。融合提问是另一种 kind，测试里另外处理。 */
 function intentRequestsOf(state: RunState): readonly IntentRequest[] {
   return state.agentRequests.filter((r): r is IntentRequest => r.kind === 'intent');
@@ -292,7 +300,7 @@ describe('startRun', () => {
     expect(state.encounter.turn).toBe(1);
     expect(state.encounter.player.hand).toHaveLength(5);
     expect(state.encounter.player.drawPile).toHaveLength(STARTING_DECK.length - 5);
-    expect(state.encounter.combatants).toHaveLength(3);
+    expect(state.encounter.combatants.length).toBeGreaterThan(0);
     expect(state.encounter.combatants.every((c) => c.hp > 0)).toBe(true);
     // 两个敌对 Faction 同场——这不是「玩家对一队敌人」
     expect(new Set(state.encounter.combatants.map((c) => c.factionId)).size).toBe(2);
@@ -383,7 +391,8 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   it('Run 一开始就挂出一个 IntentRequest', () => {
     const state = fresh();
 
-    expect(state.agentRequests).toHaveLength(3); // 每个 Combatant 一条
+    // 每个 Combatant 一条
+    expect(state.agentRequests).toHaveLength(state.encounter.combatants.length);
     expect(intentRequestsOf(state).some((r) => r.combatantId === GUARD)).toBe(true);
     expect(state.agentRequests[0]?.requestedAtMs).toBe(0);
     expect(state.encounter.combatants.every((c) => c.intent === null)).toBe(true);
@@ -417,7 +426,9 @@ describe('Agent 与 Intent（ADR-0001）', () => {
 
     const before = fresh();
     const crushed = applyInput(guardActs(before, 'crush'), { type: 'end_turn', atMs: 1000 });
-    expect(crushed.encounter.player.hp).toBe(before.encounter.player.hp - 11);
+    expect(crushed.encounter.player.hp).toBe(
+      before.encounter.player.hp - amountOf(before, 'crush'),
+    );
   });
 
   it('台词会被记进 journal', () => {
@@ -1023,8 +1034,9 @@ describe('Atom 效果', () => {
     state = playCard(state, 'sap');
     expect(foeOf(state).statuses.weakened).toBe(true);
 
+    const halved = Math.round(amountOf(state, 'slash') * 0.5);
     state = applyInput(state, { type: 'end_turn', atMs: 1000 });
-    expect(state.encounter.player.hp).toBe(hpBefore - 4);
+    expect(state.encounter.player.hp).toBe(hpBefore - halved);
     expect(foeOf(state).statuses.weakened).toBe(false);
   });
 
@@ -1065,8 +1077,9 @@ describe('Atom 效果', () => {
     state = playCard(state, 'brace');
     expect(state.encounter.player.statuses.endure).toBe(2);
 
+    const reduced = amountOf(state, 'slash') - 2; // 坚忍减免 2
     state = applyInput(state, { type: 'end_turn', atMs: 1000 });
-    expect(state.encounter.player.hp).toBe(hpBefore - 5);
+    expect(state.encounter.player.hp).toBe(hpBefore - reduced);
     expect(state.encounter.player.statuses.endure).toBe(0);
   });
 
@@ -1137,13 +1150,14 @@ describe('AgentRequest 管道（ADR-0010）', () => {
 
   it('提问不会跨回合堆积：没回答的问题在回合推进时作废', () => {
     const state = beginRun(SEED, { startedAtMs: 0 });
-    expect(state.agentRequests).toHaveLength(3); // 每个 Combatant 一条
+    const asked = state.encounter.combatants.length; // 每个 Combatant 一条
+    expect(state.agentRequests).toHaveLength(asked);
     const firstIds = new Set(state.agentRequests.map((r) => r.id));
 
     // 一直不回答，直接结束回合
     const next = applyInput(state, { type: 'end_turn', atMs: 5000 });
 
-    expect(next.agentRequests).toHaveLength(3);
+    expect(next.agentRequests).toHaveLength(asked);
     expect(next.agentRequests.some((r) => firstIds.has(r.id))).toBe(false);
     // 上一回合的对手仍然行动了——引擎替它选（ADR-0001）
     expect(next.encounter.player.hp).toBeLessThan(state.encounter.player.hp);
@@ -1168,11 +1182,56 @@ describe('多方混战与站队', () => {
     return beginRun(SEED, { startedAtMs: 0, ...options });
   }
 
+  it('两派在同一层对等：一样多的人、一样厚的血、一样重的手', () => {
+    // 不对等的话，「杀谁放谁」就不再是表态而是算术——人少血薄的那一方永远是更便宜的
+    // 猎物，于是每一局都往同一个方向站队。而 Loadout 只能取自单个 Faction，带另一派
+    // 的牌进塔就等于白交一份难度税。
+    //
+    // 这条不挑 seed：名册是固定的，每一层都该成立。
+    for (const floor of [1, 2, 3, 4, 5]) {
+      const field = combatantsForFloor(floor, [], (id) => id);
+      const tally = (factionId: string): { count: number; hp: number; punch: number } => {
+        const units = field.filter((c) => c.factionId === factionId);
+        return {
+          count: units.length,
+          hp: units.reduce((sum, c) => sum + c.maxHp, 0),
+          punch: units.reduce(
+            (sum, c) =>
+              sum +
+              Math.max(...c.actions.filter((a) => a.kind === 'attack').map((a) => a.amount)),
+            0,
+          ),
+        };
+      };
+
+      const red = tally('red-ring');
+      const green = tally('green-vine');
+
+      expect(red.count).toBe(green.count);
+      expect(red.count).toBeGreaterThan(0);
+      // 血量随层数缩放，所以按比例给容差，不写死一个绝对值
+      expect(Math.abs(red.hp - green.hp)).toBeLessThanOrEqual(Math.ceil(red.hp * 0.1));
+      expect(Math.abs(red.punch - green.punch)).toBeLessThanOrEqual(1);
+    }
+
+    // 第 1 层真的就是这个场面——上面那几层走的是同一个函数，这里过一遍 seam
+    const opening = beginRun(SEED);
+    for (const factionId of ['red-ring', 'green-vine']) {
+      expect(
+        opening.encounter.combatants.filter((c) => c.factionId === factionId).length,
+      ).toBe(combatantsForFloor(1, [], (id) => id).filter((c) => c.factionId === factionId).length);
+    }
+  });
+
   it('每个 Combatant 各有一条提问，即使同属一个 Faction', () => {
     const state = fresh();
     const asked = intentRequestsOf(state).map((r) => r.combatantId).sort();
 
-    expect(asked).toEqual([ARCHER, SCOUT, GUARD].sort());
+    expect(asked).toEqual([...state.encounter.combatants.map((c) => c.id)].sort());
+    expect(asked).toContain(ARCHER);
+    expect(asked).toContain(GUARD);
+    expect(asked).toContain(SCOUT);
+
     // 同派的两个单位分别被问——合并成一次调用是 ADR-0004 明确拒绝的
     const redRequests = state.agentRequests.filter((r) => r.factionId === 'red-ring');
     expect(redRequests).toHaveLength(2);
@@ -1608,15 +1667,17 @@ describe('Memory 与 Standing', () => {
     // 第一次清场之后还没结怨到那个份上
     const once = clearedOnce();
     const secondFloor = applyInput(once, { type: 'choose_favor', cardId: null, atMs: 20_000 });
-    expect(secondFloor.encounter.combatants).toHaveLength(3);
+    const normal = secondFloor.encounter.combatants.filter((c) => c.factionId === 'green-vine');
 
     // 第二次还挑青蔓，第三层它就带人来了
     const twice = clearFloor(secondFloor);
     const thirdFloor = applyInput(twice, { type: 'choose_favor', cardId: null, atMs: 40_000 });
-    expect(thirdFloor.encounter.combatants.length).toBeGreaterThan(3);
+    expect(thirdFloor.encounter.combatants.length).toBeGreaterThan(
+      secondFloor.encounter.combatants.length,
+    );
     expect(
       thirdFloor.encounter.combatants.filter((c) => c.factionId === 'green-vine'),
-    ).toHaveLength(2);
+    ).toHaveLength(normal.length + 1);
   });
 
   it('同向站队两次跨过阈值，Favor 升到高阶', () => {
@@ -1772,7 +1833,10 @@ describe('Fusion 与 Mutation', () => {
       expect(outcome.phase).toBe('choosing_favor'); // Run 继续
       expect(outcome.forged).toHaveLength(2);
       const forged = outcome.forged[1]!;
-      expect(forged.atoms).toHaveLength(request.atoms.length - 1);
+      // 丢到不超上限为止，能少丢就少丢
+      expect(forged.atoms).toHaveLength(
+        Math.min(request.atoms.length - 1, MAX_ATOMS_PER_CARD),
+      );
       for (const atom of forged.atoms) expect(request.atoms).toContain(atom);
     }
   });
@@ -1789,7 +1853,7 @@ describe('Fusion 与 Mutation', () => {
 
     const forged = done.forged[1]!;
     expect(forged.name).toBe('断链');
-    expect(forged.atoms).toHaveLength(request.atoms.length - 1);
+    expect(forged.atoms).toHaveLength(Math.min(request.atoms.length - 1, MAX_ATOMS_PER_CARD));
   });
 
   it('过载换来的是一个额外的位置，装的正是禁忌 Atom', () => {
@@ -2697,3 +2761,83 @@ describe('Loadout 与 Unlock Ledger', () => {
     expect(isLegalLoadout(NEW_SAVE_LEDGER, defaultLoadout(NEW_SAVE_LEDGER))).toBe(true);
   });
 });
+
+describe('两派对等（#16）', () => {
+  /**
+   * 最严基线：对手一个都不回答，全部超时回退成打你。
+   *
+   * 它不是常见局面，但它是**唯一不掺策略的**局面——两派的差距在这里只可能来自
+   * 名册本身。带谁的牌进塔，就集火另一派：那是玩家最自然的走法，也正是 Loadout
+   * 只能取自单个 Faction 之后可能被收难度税的那条路。
+   */
+  function pressBeat(state: RunState): PlayerInput {
+    const pending = state.encounter.pending!;
+    const target = pending.spec.targets[pending.presses.length]!;
+    const off = (pending.spec.perfectTolerance + pending.spec.goodTolerance) / 2;
+    return {
+      type: 'execution_input',
+      atMs: pending.openedAtMs + pending.spec.windowMs * (target + off),
+    };
+  }
+
+  function depth(deck: readonly string[], seed: number, aimAt: string): number {
+    let state = beginRun(seed, { startingDeck: deck, startedAtMs: 0 });
+    for (let step = 0; step < 12_000 && state.phase !== 'ended'; step++) {
+      if (state.phase === 'choosing_favor') {
+        state = applyInput(state, {
+          type: 'choose_favor',
+          cardId: state.favor?.choices[0] ?? null,
+          atMs: 100_000 + step,
+        });
+        continue;
+      }
+      if (state.phase === 'fusing') {
+        state = applyInput(state, { type: 'tick', atMs: 200_000 + step * 100 });
+        continue;
+      }
+      if (state.encounter.pending) {
+        state = applyInput(state, pressBeat(state));
+        continue;
+      }
+
+      // 报时把提问推过截止点，对手全部回退
+      state = applyInput(state, { type: 'tick', atMs: 300_000 + step * 3000 });
+      if (state.phase === 'ended' || state.encounter.pending) continue;
+
+      const boss = state.encounter.combatants.find((c) => c.isBoss && c.hp > 0);
+      const victim =
+        boss ??
+        state.encounter.combatants.find((c) => c.hp > 0 && c.factionId === aimAt) ??
+        state.encounter.combatants.find((c) => c.hp > 0);
+      const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
+
+      if (card && victim) {
+        state = applyInput(state, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 400_000 + step,
+          targetId: victim.id,
+        });
+      } else {
+        state = applyInput(state, { type: 'end_turn', atMs: 500_000 + step * 3000 });
+      }
+    }
+    return state.floor;
+  }
+
+  it('两派的单派系默认牌组走到的层数，差不超过一层', () => {
+    const red = defaultLoadout(NEW_SAVE_LEDGER, 'red-ring');
+    const green = defaultLoadout(NEW_SAVE_LEDGER, 'green-vine');
+
+    for (const seed of [1, 2, 3, 7, 11]) {
+      const withRed = depth(red, seed, 'green-vine');
+      const withGreen = depth(green, seed, 'red-ring');
+
+      expect(withRed).toBeGreaterThan(0);
+      expect(withGreen).toBeGreaterThan(0);
+      // 带谁的牌进塔是表态，不该是难度选择
+      expect(Math.abs(withRed - withGreen)).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
