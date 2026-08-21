@@ -330,7 +330,7 @@ function settleIntent(
   if (!combatant) return state;
 
   const parsed = timedOut ? null : parseIntent(state, combatant, payload);
-  const intent = parsed ?? fallbackIntent(combatant);
+  const intent = parsed ?? fallbackIntent(state, combatant);
   const note = parsed
     ? `${combatant.name}打定了主意。`
     : timedOut
@@ -413,20 +413,26 @@ function parseIntent(
  * 模型没能按时给出合法答案时，引擎替它选。规则简单且确定：血量掉到三分之一
  * 以下就自保，否则进攻。可玩性因此不依赖模型可用性（ADR-0001）。
  */
-export function fallbackIntent(combatant: CombatantState): Intent {
+export function fallbackIntent(state: RunState, combatant: CombatantState): Intent {
   const wantsDefend = combatant.hp * 3 <= combatant.maxHp;
   const preferred = combatant.actions.find(
     (action) => action.kind === (wantsDefend ? 'defend' : 'attack'),
   );
   const action = preferred ?? combatant.actions[0];
-  // 回退永远打玩家：它刻意是无脑的那条路。Agent 选择去打别的派系，因此是一个
+  if (!action || action.kind !== 'attack') {
+    return { actionId: action?.id ?? '', targetId: null, line: '', source: 'fallback' };
+  }
+
+  // 回退默认打玩家——它刻意是无脑的那条路，所以「主动去打别的派系」才成为一个
   // 玩家看得出来的、比回退更聪明的决定。
-  return {
-    actionId: action?.id ?? '',
-    targetId: action?.kind === 'attack' ? PLAYER_TARGET : null,
-    line: '',
-    source: 'fallback',
-  };
+  //
+  // 唯一的例外是援军：塔顶那些站你这边的人，回退时不该反过来打你。它们打首领。
+  const legal = legalTargetsFor(state, combatant, action);
+  const boss = state.encounter.combatants.find((c) => c.isBoss && c.hp > 0);
+  const isAlly = boss !== undefined && !state.encounter.siege && combatant.factionId !== boss.factionId;
+  const target = isAlly && legal.includes(boss.id) ? boss.id : PLAYER_TARGET;
+
+  return { actionId: action.id, targetId: target, line: '', source: 'fallback' };
 }
 
 /** 某个 kind 现在有没有待回答的提问。渲染层用它显示「正在盘算」。 */

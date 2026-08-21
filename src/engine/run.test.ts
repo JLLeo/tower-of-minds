@@ -2008,6 +2008,60 @@ describe('Boss 层（ADR-0008）', () => {
     expect(boss.actions.some((a) => a.id === 'card:bramble')).toBe(false);
   });
 
+  it('围攻不该比被人喜欢更轻松：得罪所有人时每一方都来', () => {
+    const liked = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'sided', floor: 1 }, { kind: 'sided', floor: 2 }],
+    });
+    const hated = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'harmed', floor: 1, amount: 40 }],
+    });
+
+    expect(hated.encounter.siege).toBe(true);
+    // 围攻的场面不比有援军的时候小——每一个别的 Faction 都派了人来
+    expect(hated.encounter.combatants.length).toBeGreaterThanOrEqual(
+      liked.encounter.combatants.length,
+    );
+    expect(hated.encounter.combatants.some((c) => c.factionId === 'red-ring')).toBe(true);
+  });
+
+  it('都是 0 的中立局面既没有援军也不是围攻', () => {
+    const neutral = atTop({});
+    expect(neutral.encounter.siege).toBe(false);
+    const bossFaction = bossOf(neutral)!.factionId;
+    expect(neutral.encounter.combatants.every((c) => c.factionId === bossFaction)).toBe(true);
+  });
+
+  it('援军超时也不会反过来打你', () => {
+    const state = atTop({
+      'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
+      'red-ring': [{ kind: 'sided', floor: 1 }, { kind: 'sided', floor: 2 }],
+    });
+    const ally = state.encounter.combatants.find((c) => c.factionId === 'red-ring')!;
+    const request = state.agentRequests.find(
+      (r): r is IntentRequest => r.kind === 'intent' && r.combatantId === ally.id,
+    )!;
+
+    const expired = applyInput(state, {
+      type: 'tick',
+      atMs: request.requestedAtMs + request.timeoutMs,
+    });
+
+    const decided = expired.encounter.combatants.find((c) => c.id === ally.id)!;
+    expect(decided.intent?.source).toBe('fallback');
+    expect(decided.intent?.targetId).toBe(bossOf(state)!.id); // 打首领，不是打你
+  });
+
+  it('每个 Faction 都拿得出一位首领', () => {
+    // #10 会生成 Faction，那时不该因为漏配一张表就让塔顶空着
+    for (const agent of fresh().agents) {
+      const top = atTop({ [agent.factionId]: [{ kind: 'harmed', floor: 1, amount: 99 }] });
+      expect(bossOf(top)).toBeDefined();
+      expect(bossOf(top)?.factionId).toBe(agent.factionId);
+    }
+  });
+
   it('首领倒下这一场就结束，不管旁边还站着谁', () => {
     let state = atTop({
       'green-vine': [{ kind: 'harmed', floor: 1, amount: 60 }],
@@ -2051,5 +2105,65 @@ describe('Boss 层（ADR-0008）', () => {
     expect(state.phase).toBe('ended');
     expect(state.outcome).toBe('defeat');
     expect(state.encounter.player.hp).toBe(0);
+  });
+});
+
+describe('一局完整的塔', () => {
+  it('从 startRun 一路打到塔顶：五个普通 Floor 加一场首领战', () => {
+    let state = startRun(BUILT_IN_GENERATION, SEED, {
+      startingDeck: Array.from({ length: 10 }, () => 'heavy'),
+      startedAtMs: 0,
+    });
+    const floorsSeen: number[] = [];
+    let bossFought = '';
+
+    for (let step = 0; step < 4000 && state.phase !== 'ended'; step++) {
+      if (!floorsSeen.includes(state.floor)) floorsSeen.push(state.floor);
+
+      if (state.phase === 'choosing_favor') {
+        state = applyInput(state, {
+          type: 'choose_favor',
+          cardId: state.favor?.choices[0] ?? null,
+          atMs: 100_000 + step,
+        });
+        continue;
+      }
+      if (state.phase === 'fusing') {
+        state = applyInput(state, { type: 'tick', atMs: 200_000 + step * 100 });
+        continue;
+      }
+
+      state = allDefend(state);
+      if (state.encounter.phase === 'awaiting_execution') {
+        state = applyInput(state, pressAt(state, 0.75));
+        continue;
+      }
+
+      const boss = state.encounter.combatants.find((c) => c.isBoss && c.hp > 0);
+      if (boss) bossFought = boss.name;
+      const victim =
+        boss ?? state.encounter.combatants.find((c) => c.hp > 0 && c.factionId === 'green-vine');
+      const card = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
+
+      if (card && victim) {
+        state = applyInput(state, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 1000 + step,
+          targetId: victim.id,
+        });
+      } else {
+        state = applyInput(state, { type: 'end_turn', atMs: 2000 + step * 10 });
+      }
+    }
+
+    expect(state.phase).toBe('ended');
+    expect(state.outcome).toBe('victory');
+    // 五个普通 Floor 加塔顶，一个都没漏
+    expect(floorsSeen).toEqual([1, 2, 3, 4, 5, NORMAL_FLOORS + 1]);
+    expect(bossFought).not.toBe('');
+    // 跨局的东西一律清空（ADR-0003 / ADR-0009）
+    expect(Object.keys(state.memories)).toHaveLength(0);
+    expect(state.forged).toHaveLength(0);
   });
 });

@@ -104,7 +104,7 @@ function mintCard(definitionId: string, seq: number): CardInstance {
 function fieldFor(state: RunState, floor: number): readonly CombatantState[] {
   if (!isBossFloor(floor)) return combatantsForFloor(floor, offendedFactions(state));
   const top = topOfTower(state);
-  return bossFloorCombatants(top.bossFactionId, top.allies);
+  return bossFloorCombatants(top.bossFactionId, top.allies, top.siege, floor, top.others);
 }
 
 /** 还没有 Encounter 时的占位。startRun 立刻会用真正的第一层覆盖它。 */
@@ -330,18 +330,24 @@ export function isBossFloor(floor: number): boolean {
 export function topOfTower(state: RunState): {
   bossFactionId: string;
   allies: readonly string[];
+  others: readonly string[];
   siege: boolean;
 } {
   const scored = state.agents
     .map((agent) => ({ factionId: agent.factionId, standing: standingOf(state, agent.factionId) }))
     .sort((a, b) => a.standing - b.standing);
 
-  const boss = scored[0]?.factionId ?? state.agents[0]?.factionId ?? '';
-  const allies = scored
-    .filter((entry) => entry.factionId !== boss && entry.standing > 0)
-    .map((entry) => entry.factionId);
+  // 平手时按 agents 的顺序定——确定性有了，但这意味着一局都没得罪过谁的时候，
+  // 塔顶坐的永远是名册里的第一家。真要消除这一点，得让 Generation 去洗牌（#10）。
+  const boss = scored[0]?.factionId ?? '';
+  const others = scored.filter((e) => e.factionId !== boss);
+  const allies = others.filter((e) => e.standing > 0).map((e) => e.factionId);
 
-  return { bossFactionId: boss, allies, siege: allies.length === 0 };
+  // 围攻的门槛是「谁都得罪光了」：别的每一方都为负。都是 0 的中立局面两者皆非，
+  // 首领只带亲随出场。
+  const siege = others.length > 0 && others.every((e) => e.standing < 0);
+
+  return { bossFactionId: boss, allies, others: others.map((e) => e.factionId), siege };
 }
 
 /** 玩家没有指定目标时打谁。渲染层读它来高亮，不自己再推一遍。 */
@@ -690,7 +696,7 @@ function endTurn(state: RunState, atMs: number): RunState {
     if (!combatant || combatant.hp <= 0) continue;
 
     // 还没等到模型回答就轮到它行动：引擎替它选，Run 不停。
-    const intent = combatant.intent ?? fallbackIntent(combatant);
+    const intent = combatant.intent ?? fallbackIntent(state, combatant);
     const action = combatant.actions.find((a) => a.id === intent.actionId);
 
     // 上一轮攒下的 block 在它再次行动时清空，行动完 intent 也随之作废。
@@ -856,12 +862,13 @@ function checkOutcome(state: RunState): RunState {
   // 塔顶的规矩不一样：首领倒下这一场就结束，不管旁边还站着谁。
   if (isBossFloor(state.floor)) {
     const boss = encounter.combatants.find((combatant) => combatant.isBoss);
-    if (!boss || boss.hp <= 0) {
+    // 首领根本不在场是内容出了问题，不是玩家赢了——那种情况下这一场不该结束。
+    if (boss && boss.hp <= 0) {
       return clearFloor({
         ...state,
         agentRequests: [],
         encounter: { ...encounter, phase: 'ended', pending: null },
-        journal: [...state.journal, `${boss?.name ?? '塔顶那位'}倒下了。`],
+        journal: [...state.journal, `${boss.name}倒下了。`],
       });
     }
     return state;

@@ -236,68 +236,78 @@ const LEADERS: Readonly<Record<string, LeaderTemplate>> = {
   },
 };
 
+/** 首领身边那位亲随比平时厚一些；援军与围攻者按同一个系数来。 */
+const ESCORT_SCALE = 1.4;
+const SUPPORT_SCALE = 1.2;
+
 /**
  * 塔顶的场面。Boss 是你 Standing 最低的那一方的首领——难度是你自己填的期末试卷。
  *
- * allies 里的 Faction 会派人来帮你打它；siege 为真时所有人联手对付你。
+ * allies 里的 Faction 派人来帮你打它；siege 为真时**每一个**别的 Faction 都派人来，
+ * 但它们是冲你来的。得罪所有人不该比被人喜欢更轻松。
  */
 export function bossFloorCombatants(
   bossFactionId: string,
   allies: readonly string[],
+  siege: boolean,
+  floor: number,
+  otherFactionIds: readonly string[],
 ): readonly CombatantState[] {
-  const leader = LEADERS[bossFactionId];
-  const field: CombatantState[] = [];
-
-  if (leader) {
-    field.push({
-      id: leader.id,
-      name: leader.name,
-      factionId: bossFactionId,
-      hp: leader.hp,
-      maxHp: leader.hp,
-      block: 0,
-      actions: leader.actions,
-      intent: null,
-      statuses: NO_STATUSES,
-      isBoss: true,
-    });
-  }
-
-  // 首领不是一个人来的。
-  const escort = ROSTER.find((t) => t.factionId === bossFactionId);
-  if (escort) {
-    const hp = Math.round(escort.hp * 1.4);
-    field.push({
-      id: `${escort.id}-escort`,
-      name: `${escort.name}（亲随）`,
-      factionId: bossFactionId,
-      hp,
-      maxHp: hp,
-      block: 0,
-      actions: escort.actions,
-      intent: null,
-      statuses: NO_STATUSES,
-    });
-  }
-
-  for (const allyId of allies) {
-    const template = ROSTER.find((t) => t.factionId === allyId);
-    if (!template) continue;
-    const hp = Math.round(template.hp * 1.2);
-    field.push({
-      id: `${template.id}-ally`,
-      name: `${template.name}（援军）`,
-      factionId: allyId,
+  const scale = 1 + 0.12 * (floor - 1);
+  const build = (
+    template: { id: string; name: string; hp: number; actions: readonly CombatantAction[] },
+    factionId: string,
+    suffix: string,
+    multiplier: number,
+    isBoss?: true,
+  ): CombatantState => {
+    const hp = Math.round(template.hp * scale * multiplier);
+    return {
+      id: template.id + suffix,
+      name: template.name + (suffix ? `（${suffix === '-escort' ? '亲随' : siege ? '围攻' : '援军'}）` : ''),
+      factionId,
       hp,
       maxHp: hp,
       block: 0,
       actions: template.actions,
       intent: null,
       statuses: NO_STATUSES,
-    });
+      ...(isBoss ? { isBoss } : {}),
+    };
+  };
+
+  const field: CombatantState[] = [];
+
+  // 每个 Faction 都必须有一位首领。没有明写的就从它的名册里推一个出来——
+  // #10 会生成 Faction，那时不该因为漏配一张表就让塔顶空着。
+  const leader = LEADERS[bossFactionId] ?? improvisedLeader(bossFactionId);
+  if (leader) field.push(build(leader, bossFactionId, '', 1, true));
+
+  const escort = ROSTER.find((t) => t.factionId === bossFactionId);
+  if (escort) field.push(build(escort, bossFactionId, '-escort', ESCORT_SCALE));
+
+  // 援军站你这边；围攻者站它那边。谁来、来几个，由你一路的 Standing 决定。
+  const supporters = siege ? otherFactionIds : allies;
+  for (const factionId of supporters) {
+    const template = ROSTER.find((t) => t.factionId === factionId);
+    if (template) field.push(build(template, factionId, '-support', SUPPORT_SCALE));
   }
 
   return field;
+}
+
+/** 没有明写首领的 Faction：拿它名册里最硬的那个顶上，血量翻倍。 */
+function improvisedLeader(factionId: string): LeaderTemplate | undefined {
+  const template = [...ROSTER]
+    .filter((t) => t.factionId === factionId)
+    .sort((a, b) => b.hp - a.hp)[0];
+  if (!template) return undefined;
+  return {
+    id: `${template.id}-leader`,
+    name: `${template.name}·首领`,
+    hp: template.hp * 2,
+    actions: template.actions,
+  };
 }
 
 /** 每个 Faction 自己的 Base Card，Favor 从这里给。 */
