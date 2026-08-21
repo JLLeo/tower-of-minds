@@ -394,6 +394,11 @@ export interface RunState {
   readonly ledger: UnlockLedger;
   /** 这一局挣到的解锁。通关前一直是空的。 */
   readonly earnedUnlocks: readonly string[];
+  /**
+   * 本局每张牌打出过几次，按 definition id 计。`greed`（贪）靠它越打越贵——
+   * 费用因此不再是牌面上那个死数，读费用要走 costFor。
+   */
+  readonly playedCounts: Readonly<Record<string, number>>;
 }
 
 /**

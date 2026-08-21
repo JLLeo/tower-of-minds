@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { forgeCard } from './fusion.js';
 import {
   applyInput,
   canPlay,
+  costFor,
   definitionOf,
   currentSiding,
   cardById,
@@ -11,7 +13,7 @@ import {
   standings,
   startRun,
 } from './run.js';
-import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
+import { ATOMS, MAX_ATOMS_PER_CARD, costOf, describeAtom, effectsOf } from './atoms.js';
 import {
   BUILT_IN_GENERATION,
   CARD_POOL,
@@ -881,12 +883,16 @@ describe('Atom 系统', () => {
     // 这条不在 seam 上：它守的是 Atom 表本身的完整性，而不是某个行为。
     // 没有它，新加的 Atom 会静默地只参与费用计算却什么都不做。
     //
-    // 判定轴例外，而且是有意的：steady / focus / reflex 改的是**这张牌怎么判**，
-    // 不是打出去什么。它们的作用由「判定轴 Atom」那一节盯着。
+    // 两类例外，都是有意的：判定轴（steady / focus / reflex）改的是**这张牌怎么判**，
+    // 禁忌 Atom 改的是**这张牌怎么结算**（打谁、打几个、翻不翻倍、越打越贵）。
+    // 两类都不产生 Effect，作用由各自那一节盯着。
+    const MODIFIERS = new Set(['steady', 'focus', 'reflex', 'sacrifice', 'wild', 'contagion', 'greed']);
     for (const atom of ATOMS) {
-      if (atom.pendingTicket || atom.axis === 'execution') continue;
+      if (atom.pendingTicket || MODIFIERS.has(atom.id)) continue;
       expect(effectsOf([atom.id], 'tower-guard').length).toBeGreaterThan(0);
     }
+    // 名单不许悄悄变长：每一个进来的都得在别处被真的实现
+    expect(ATOMS.filter((a) => MODIFIERS.has(a.id))).toHaveLength(MODIFIERS.size);
   });
 
   it('每个 Faction 都有自己的一套 Base Card，含一张 Parley', () => {
@@ -2837,6 +2843,186 @@ describe('两派对等（#16）', () => {
       expect(withGreen).toBeGreaterThan(0);
       // 带谁的牌进塔是表态，不该是难度选择
       expect(Math.abs(withRed - withGreen)).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe('Forbidden Atom（#17）', () => {
+  /**
+   * 禁忌 Atom 只有 Mutation 拿得到，Base Card 上一个都没有——所以测试自己锻一张。
+   * 锻的路径和过载走的是同一个 forgeCard，牌面因此和玩家真正拿到的那张一致。
+   */
+  function withForged(atoms: readonly string[], options: RunOptions = {}): RunState {
+    const start = beginRun(SEED, { startingDeck: ['strike'], ...options });
+    const forged = forgeCard({ atoms, name: '禁忌', factionId: 'red-ring', seq: 1 });
+    return {
+      ...start,
+      forged: [forged],
+      encounter: {
+        ...start.encounter,
+        player: {
+          ...start.encounter.player,
+          energy: 9, // 别让能量成为这一节的干扰项
+          hand: [
+            { instanceId: 'x#0', definitionId: forged.id },
+            { instanceId: 'x#1', definitionId: forged.id },
+            { instanceId: 'x#2', definitionId: forged.id },
+          ],
+        },
+      },
+    };
+  }
+
+  function playForged(state: RunState, instanceId: string, targetId?: string): RunState {
+    return settleGood(
+      applyInput(state, { type: 'play_card', instanceId, atMs: 100, targetId }),
+    );
+  }
+
+  it('四个禁忌 Atom 都不出现在 Base Card 上，而且更强也更便宜', () => {
+    const forbidden = ATOMS.filter((a) => a.forbidden);
+    expect(forbidden).toHaveLength(4);
+    for (const atom of forbidden) {
+      expect(atom.weight).toBeLessThan(0);
+      expect(atom.pendingTicket).toBeUndefined(); // 全部落地了
+      expect(describeAtom(atom).length).toBeGreaterThan(0); // 代价写在牌面上
+      expect(CARD_POOL.some((card) => card.atoms.includes(atom.id))).toBe(false);
+    }
+  });
+
+  it('献：付 5 点生命，本卡其余 Atom 效果翻倍', () => {
+    const plain = withForged(['strike']);
+    const cursed = withForged(['strike', 'sacrifice']);
+    const foe = plain.encounter.combatants[0]!.id;
+
+    const after = playForged(plain, 'x#0', foe);
+    const bled = playForged(cursed, 'x#0', foe);
+
+    const dealt = (s: RunState): number =>
+      s.encounter.combatants.find((c) => c.id === foe)!.maxHp -
+      s.encounter.combatants.find((c) => c.id === foe)!.hp;
+
+    expect(dealt(bled)).toBe(dealt(after) * 2);
+    expect(bled.encounter.player.hp).toBe(plain.encounter.player.hp - 5);
+    expect(after.encounter.player.hp).toBe(plain.encounter.player.hp);
+  });
+
+  it('献：自伤能当场把人放倒，那一局就到此为止', () => {
+    const cursed = withForged(['strike', 'sacrifice']);
+    const dying: RunState = {
+      ...cursed,
+      encounter: {
+        ...cursed.encounter,
+        player: { ...cursed.encounter.player, hp: 3 },
+      },
+    };
+
+    const done = playForged(dying, 'x#0', dying.encounter.combatants[0]!.id);
+    expect(done.encounter.player.hp).toBe(0);
+    expect(done.phase).toBe('ended');
+    expect(done.outcome).toBe('defeat');
+  });
+
+  it('狂：目标随机，但同一 seed 加同一串输入还是同一个 Run', () => {
+    const cursed = withForged(['strike', 'wild']);
+    const aimed = cursed.encounter.combatants[0]!.id;
+
+    // 指定了目标也没用——狂说了算
+    const once = playForged(cursed, 'x#0', aimed);
+    const again = playForged(cursed, 'x#0', aimed);
+    expect(again.encounter.combatants).toEqual(once.encounter.combatants);
+    expect(again.rng).toEqual(once.rng);
+
+    // 打出去的那一下确实落在了场上某个人身上
+    const hurt = once.encounter.combatants.filter((c) => c.hp < c.maxHp);
+    expect(hurt).toHaveLength(1);
+
+    // 连打几张，落点不总是同一个人
+    let state = cursed;
+    const hitIds = new Set<string>();
+    for (const id of ['x#0', 'x#1', 'x#2']) {
+      const before = new Map(state.encounter.combatants.map((c) => [c.id, c.hp]));
+      state = playForged(state, id, aimed);
+      for (const c of state.encounter.combatants) {
+        if ((before.get(c.id) ?? c.hp) > c.hp) hitIds.add(c.id);
+      }
+    }
+    expect(hitIds.size).toBeGreaterThan(1);
+  });
+
+  it('疫：打到场上每一个人，包括你偏袒的那一方', () => {
+    const cursed = withForged(['strike', 'contagion']);
+    const done = playForged(cursed, 'x#0', cursed.encounter.combatants[0]!.id);
+
+    expect(done.encounter.combatants.every((c) => c.hp < c.maxHp)).toBe(true);
+    // 两派都挨了打——站队因此被搅乱，这正是它的代价
+    const factions = new Set(done.encounter.combatants.map((c) => c.factionId));
+    expect(factions.size).toBeGreaterThan(1);
+    for (const factionId of factions) {
+      expect(done.encounter.damageDealtTo[factionId]).toBeGreaterThan(0);
+    }
+  });
+
+  it('疫：给自己的那部分只结算一次，不按人数翻倍', () => {
+    const plain = withForged(['guard']);
+    const spread = withForged(['guard', 'contagion']);
+
+    const after = playForged(plain, 'x#0');
+    const infected = playForged(spread, 'x#0');
+
+    expect(infected.encounter.player.block).toBe(after.encounter.player.block);
+  });
+
+  it('贪：本局每打出一次就贵一点，费用、能否打出与牌面三处一致', () => {
+    const cursed = withForged(['strike', 'greed']);
+    const definition = cursed.forged[0]!;
+
+    expect(costFor(cursed, definition)).toBe(definition.cost);
+
+    const once = playForged(cursed, 'x#0', cursed.encounter.combatants[0]!.id);
+    expect(costFor(once, definition)).toBe(definition.cost + 1);
+
+    const twice = playForged(once, 'x#1', once.encounter.combatants[0]!.id);
+    expect(costFor(twice, definition)).toBe(definition.cost + 2);
+
+    // 能量掉的是涨过之后的价
+    const spent = once.encounter.player.energy - twice.encounter.player.energy;
+    expect(spent).toBe(definition.cost + 1);
+  });
+
+  it('贪：涨价跨回合，一局之内一直记着', () => {
+    const cursed = withForged(['strike', 'greed']);
+    const definition = cursed.forged[0]!;
+
+    let state = playForged(cursed, 'x#0', cursed.encounter.combatants[0]!.id);
+    state = allDefend(state);
+    state = applyInput(state, { type: 'end_turn', atMs: 10_000 });
+
+    expect(costFor(state, definition)).toBe(definition.cost + 1);
+    expect(state.encounter.turn).toBeGreaterThan(cursed.encounter.turn);
+  });
+
+  it('贪：贵到打不动的时候，canPlay 就说打不动', () => {
+    const cursed = withForged(['strike', 'greed']);
+    const definition = cursed.forged[0]!;
+
+    const broke: RunState = {
+      ...cursed,
+      playedCounts: { [definition.id]: 9 },
+      encounter: {
+        ...cursed.encounter,
+        player: { ...cursed.encounter.player, energy: definition.cost },
+      },
+    };
+
+    expect(costFor(broke, definition)).toBe(definition.cost + 9);
+    expect(canPlay(broke, 'x#0')).toBe(false);
+    expect(applyInput(broke, { type: 'play_card', instanceId: 'x#0', atMs: 100 })).toBe(broke);
+  });
+
+  it('禁忌 Atom 让牌更便宜：同样的效果，带上它费用更低', () => {
+    for (const id of ['sacrifice', 'wild', 'greed']) {
+      expect(costOf(['strike', 'strike', id])).toBeLessThanOrEqual(costOf(['strike', 'strike']));
     }
   });
 });
