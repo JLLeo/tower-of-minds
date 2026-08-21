@@ -177,8 +177,8 @@ const ROSTER: readonly CombatantTemplate[] = [
  */
 export function combatantsForFloor(
   floor: number,
-  reinforced: readonly string[] = [],
-  factionName: (factionId: string) => string = (id) => id,
+  reinforced: readonly string[],
+  factionName: (factionId: string) => string,
 ): readonly CombatantState[] {
   const scale = 1 + 0.12 * (floor - 1);
   const build = (template: CombatantTemplate, suffix = ''): CombatantState => {
@@ -258,7 +258,7 @@ export function bossFloorCombatants(
   siege: boolean,
   floor: number,
   otherFactionIds: readonly string[],
-  factionName: (factionId: string) => string = (id) => id,
+  factionName: (factionId: string) => string,
 ): readonly CombatantState[] {
   const scale = 1 + 0.12 * (floor - 1);
   const build = (
