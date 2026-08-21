@@ -17,7 +17,7 @@ import {
   openIntentRequests,
   receiveResponse,
 } from './agents.js';
-import { extraActionsFor, presetDeckFor } from './deckbuild.js';
+import { extraActionsFor } from './deckbuild.js';
 import { applyForge, exceedsCapacity, fallbackName, mergeAtoms } from './fusion.js';
 import { PLAYER_TARGET } from './types.js';
 import {
@@ -158,10 +158,8 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
           ...combatant,
           actions: [
             ...combatant.actions,
-            ...extraActionsFor(
-              state,
-              state.factionDecks[combatant.factionId] ?? presetDeckFor(combatant.factionId),
-            ),
+            // 没问过就什么都没带。预设是「答不上来」的兜底，不是开局的默认。
+            ...extraActionsFor(state, state.factionDecks[combatant.factionId] ?? []),
           ],
         })),
         pending: null,
@@ -205,7 +203,10 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
     case 'fuse':
       return startFusion(state, input.offeredCardId, input.deckInstanceId, input.overload, input.atMs);
     case 'tick':
-      return expireRequests(expireIfWindowClosed(state, input.atMs), input.atMs);
+      return expireRequests(
+        openDeckbuildIfNeeded(expireIfWindowClosed(state, input.atMs), input.atMs),
+        input.atMs,
+      );
   }
 }
 
@@ -809,6 +810,7 @@ function checkOutcome(state: RunState): RunState {
       outcome: 'defeat',
       memories: {},
       forged: [],
+      factionDecks: {},
       agentRequests: [],
       encounter: { ...encounter, phase: 'ended', pending: null },
       journal: [...state.journal, '你倒在了塔里。'],
@@ -851,6 +853,7 @@ function clearFloor(state: RunState): RunState {
       outcome: 'victory',
       memories: {},
       forged: [],
+      factionDecks: {},
       journal: [...state.journal, '你走到了塔的尽头。'],
     };
   }
@@ -874,20 +877,30 @@ function clearFloor(state: RunState): RunState {
   const offer = buildFavor(remembered, factionId);
   const agentName = remembered.agents.find((a) => a.factionId === factionId)?.name;
 
-  // 对手为下一层构筑，和玩家挑 Favor 并行——谁都不用等谁。
-  return openDeckbuildRequests(
-    {
-      ...remembered,
-      phase: 'choosing_favor',
-      favor: offer,
-      journal: [
-        ...remembered.journal,
-        agentName ? `${agentName}记下了你这一场的选择。` : '没有哪一方觉得欠你人情。',
-      ],
-    },
-    remembered.floor + 1,
-    remembered.encounter.turn * 1000,
-  );
+  return {
+    ...remembered,
+    phase: 'choosing_favor',
+    favor: offer,
+    journal: [
+      ...remembered.journal,
+      agentName ? `${agentName}记下了你这一场的选择。` : '没有哪一方觉得欠你人情。',
+    ],
+  };
+}
+
+/**
+ * 对手为下一层构筑，和玩家挑 Favor 并行——谁都不用等谁。
+ *
+ * 挂在 tick 上而不是 clearFloor 里，是因为**开一次提问需要一个真实时刻**，
+ * 而时刻只能从 input 进引擎（ADR-0001）。在引擎里凭回合数编一个出来，会让它和
+ * 宿主的 performance.now() 变成两把不同的尺子——超时判断立刻失真，实机上对手
+ * 永远走预设、从不构筑，而用同一把编造尺子的测试还照样通过。
+ */
+function openDeckbuildIfNeeded(state: RunState, atMs: number): RunState {
+  if (state.phase !== 'choosing_favor') return state;
+  if (Object.keys(state.factionDecks).length > 0) return state;
+  if (state.agentRequests.some((request) => request.kind === 'deckbuild')) return state;
+  return openDeckbuildRequests(state, state.floor + 1, atMs);
 }
 
 /**

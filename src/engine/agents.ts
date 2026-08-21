@@ -10,6 +10,7 @@ import {
   applyForge,
   fallbackName,
   forgeCard,
+  mergeAtoms,
   preferredForbidden,
   sanitizeName,
   trimToCapacity,
@@ -181,9 +182,13 @@ function settleDeckbuild(
       : {};
 
   const proposed = Array.isArray(record['cardIds']) ? (record['cardIds'] as unknown[]) : [];
-  const picked = proposed
-    .filter((id): id is string => typeof id === 'string' && request.legalCardIds.includes(id))
-    .slice(0, request.capacity);
+  const picked = [
+    ...new Set(
+      proposed.filter(
+        (id): id is string => typeof id === 'string' && request.legalCardIds.includes(id),
+      ),
+    ),
+  ].slice(0, request.capacity);
 
   const chosen = picked.length > 0 ? picked : presetDeckFor(request.factionId);
   const who = state.agents.find((a) => a.factionId === request.factionId)?.name ?? '对方';
@@ -199,7 +204,7 @@ function settleDeckbuild(
     const a = cardDefinitionOf(state, pair[0]!);
     const b = cardDefinitionOf(state, pair[1]!);
     if (a && b) {
-      const atoms = trimToCapacity(request.factionId, [...a.atoms, ...b.atoms]);
+      const atoms = trimToCapacity(request.factionId, mergeAtoms(a.atoms, b.atoms));
       const forged = forgeCard({
         atoms,
         name: sanitizeName(record['name'], fallbackName(a.name, b.name, false)),

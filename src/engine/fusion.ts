@@ -114,8 +114,9 @@ export function forgeCard(input: ForgeInput): CardDefinition {
 /**
  * 锻好一张牌，把被融掉的那张从 Deck 里换出去。
  *
- * Fusion 有两条路进来——不超上限时引擎自己锻，超了则由 Agent 取舍后再锻——
+ * 玩家那条 Fusion 有两条路进来——不超上限时引擎自己锻，超了则由 Agent 取舍后再锻——
  * 但落地只有这一处，免得两边各自维护一份 Deck 交换与编号逻辑。
+ * 对手自己的融合不换玩家的 Deck，因此走 forgeCard 而不经过这里。
  */
 export function applyForge(
   state: RunState,

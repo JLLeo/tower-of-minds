@@ -96,7 +96,12 @@ function askAgents(): void {
 // 时间的流逝：判定窗口是否耗尽、IntentRequest 是否超时，都由引擎按这个时刻判断。
 // 时机条自己另有一套逐帧动画；这里只需要够粗的粒度把超时推下去。
 setInterval(() => {
-  if (state.agentRequests.length > 0 || state.encounter.pending) {
+  // 层间也要报时：对手的构筑提问就是在这些 tick 上挂出来并计时的。
+  if (
+    state.agentRequests.length > 0 ||
+    state.encounter.pending ||
+    state.phase === 'choosing_favor'
+  ) {
     dispatch({ type: 'tick', atMs: performance.now() });
   }
 }, 200);

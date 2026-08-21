@@ -154,6 +154,7 @@ function favorView(state: RunState, view: View, dispatch: Dispatch): HTMLElement
   section.appendChild(row);
 
   if (fusing) section.appendChild(fusePicker(state, view, dispatch));
+  section.appendChild(opponentPrep(state));
 
   const skip = document.createElement('button');
   skip.className = 'primary';
@@ -411,6 +412,25 @@ function memoryView(state: RunState): HTMLElement {
     section.appendChild(box);
   }
   return section;
+}
+
+/** 层间对手在干什么：它也在为下一层备牌，备好了就摊开给玩家看。 */
+function opponentPrep(state: RunState): HTMLElement {
+  const wrap = el('div', 'prep');
+  for (const agent of state.agents) {
+    const waiting = state.agentRequests.some(
+      (request) => request.kind === 'deckbuild' && request.factionId === agent.factionId,
+    );
+    const picked = state.factionDecks[agent.factionId];
+
+    if (waiting) {
+      wrap.appendChild(el('p', 'favor-hint', `${agent.name}正在为下一层备牌…`));
+    } else if (picked && picked.length > 0) {
+      const names = picked.map((id) => cardById(state, id)?.name ?? id).join('、');
+      wrap.appendChild(el('p', 'favor-hint', `${agent.name}备好了：${names}`));
+    }
+  }
+  return wrap;
 }
 
 function cardButton(definition: CardDefinition, selected: boolean): HTMLButtonElement {

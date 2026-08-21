@@ -12,7 +12,6 @@ import {
 } from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
-import { presetDeckFor } from './deckbuild.js';
 import { PLAYER_TARGET } from './types.js';
 import type { DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
@@ -42,6 +41,17 @@ function scriptInputs(start: RunState, maxSteps = 3000): PlayerInput[] {
   const inputs: PlayerInput[] = [];
 
   for (let i = 0; i < maxSteps && state.phase !== 'ended'; i++) {
+    // 层间：先报一次时。对手的构筑提问就是在 tick 上挂出来的——引擎不自己造时刻。
+    if (state.phase === 'choosing_favor' && !state.agentRequests.some((r) => r.kind === 'deckbuild')) {
+      const ticked: PlayerInput = { type: 'tick', atMs: at() };
+      const next = applyInput(state, ticked);
+      if (next !== state) {
+        inputs.push(ticked);
+        state = next;
+        continue;
+      }
+    }
+
     // 层间的构筑提问：挑合法集里最前面的两张，模拟一个会用手边东西的对手。
     const building = state.agentRequests.filter((r) => r.kind === 'deckbuild');
     if (building.length > 0) {
@@ -1177,14 +1187,15 @@ describe('多 Floor 推进与 Favor', () => {
       applyInput(cleared, { type: 'play_card', instanceId: 'strike#0', atMs: 20_000 }),
     ).toBe(cleared);
 
-    // 对手这边：层间构筑是并行的，模型的回答与时间流逝照常放行
-    expect(cleared.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(true);
-    const built = applyInput(cleared, {
+    // 对手这边：层间构筑是并行的，时间流逝与模型的回答照常放行
+    const ticked = applyInput(cleared, { type: 'tick', atMs: 20_000 });
+    expect(ticked.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(true);
+    const built = applyInput(ticked, {
       type: 'agent_response',
-      requestId: cleared.agentRequests[0]!.id,
+      requestId: ticked.agentRequests[0]!.id,
       payload: { cardIds: [] },
     });
-    expect(built).not.toBe(cleared);
+    expect(built).not.toBe(ticked);
     expect(built.phase).toBe('choosing_favor'); // 但它没有把玩家推走
   });
 
@@ -1714,13 +1725,17 @@ describe('对手也在构筑', () => {
     return next;
   }
 
+  /** 清完一层之后报一次时——构筑提问就是在 tick 上挂出来的，实机也是这么走的。 */
+  const withDeckbuild = (state: RunState, atMs = 20_000): RunState =>
+    applyInput(state, { type: 'tick', atMs });
+
   const buildRequestOf = (state: RunState, factionId: string): DeckbuildRequest =>
     state.agentRequests.find(
       (r): r is DeckbuildRequest => r.kind === 'deckbuild' && r.factionId === factionId,
     )!;
 
   it('清完一层就为下一层挂出构筑提问，和玩家挑 Favor 并行', () => {
-    const cleared = clearFloor(fresh(deckOf('strike')));
+    const cleared = withDeckbuild(clearFloor(fresh(deckOf('strike'))));
 
     expect(cleared.phase).toBe('choosing_favor');
     for (const agent of cleared.agents) {
@@ -1731,8 +1746,29 @@ describe('对手也在构筑', () => {
     }
   });
 
-  it('合法牌集 = 自己的家底 + 它亲眼见过你打的牌', () => {
+  it('提问的时刻就是报时带进来的那个，引擎不自己造钟', () => {
+    // 这条守的是一个实机才会犯的错：引擎若凭回合数编一个时刻，它和宿主的
+    // performance.now() 就是两把尺子，超时判断立刻失真——对手永远走预设、从不构筑，
+    // 而用同一把编造尺子的测试还照样通过。
     const cleared = clearFloor(fresh(deckOf('strike')));
+    const realClock = 1_234_567;
+    const opened = withDeckbuild(cleared, realClock);
+
+    const request = buildRequestOf(opened, 'red-ring');
+    expect(request.requestedAtMs).toBe(realClock);
+
+    // 同一把尺子下，它不该在刚挂出来就被判超时
+    const soon = applyInput(opened, { type: 'tick', atMs: realClock + 100 });
+    expect(soon.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(true);
+
+    // 真到点了才超时，退回预设
+    const late = applyInput(opened, { type: 'tick', atMs: realClock + request.timeoutMs });
+    expect(late.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(false);
+    expect(late.factionDecks['red-ring']?.length).toBeGreaterThan(0);
+  });
+
+  it('合法牌集 = 自己的家底 + 它亲眼见过你打的牌', () => {
+    const cleared = withDeckbuild(clearFloor(fresh(deckOf('strike'))));
     const request = buildRequestOf(cleared, 'red-ring');
 
     // 自己派系的每一张都在
@@ -1775,6 +1811,7 @@ describe('对手也在构筑', () => {
     }
 
     expect(state.phase).toBe('choosing_favor');
+    state = withDeckbuild(state, 50_000);
     // 对赤环断言：格挡是青蔓的家底，赤环只可能从「见过玩家打出」这条路拿到它
     const request = buildRequestOf(state, 'red-ring');
 
@@ -1785,7 +1822,7 @@ describe('对手也在构筑', () => {
   });
 
   it('它挑的牌变成下一层多出来的动作，数值照玩家的规则算', () => {
-    let state = clearFloor(fresh(deckOf('strike')));
+    let state = withDeckbuild(clearFloor(fresh(deckOf('strike'))));
     const request = buildRequestOf(state, 'red-ring');
 
     state = applyInput(state, {
@@ -1811,9 +1848,11 @@ describe('对手也在构筑', () => {
   });
 
   it('三条回退路径：超时、非法选择、畸形响应，一律退回固定预设', () => {
-    const cleared = clearFloor(fresh(deckOf('strike')));
+    const cleared = withDeckbuild(clearFloor(fresh(deckOf('strike'))));
     const request = buildRequestOf(cleared, 'red-ring');
-    const preset = presetDeckFor('red-ring');
+    const preset = CARD_POOL.filter((c) => c.faction === 'red-ring')
+      .slice(0, request.capacity)
+      .map((c) => c.id);
 
     const outcomes = [
       applyInput(cleared, { type: 'tick', atMs: request.requestedAtMs + request.timeoutMs }),
@@ -1832,7 +1871,7 @@ describe('对手也在构筑', () => {
   });
 
   it('它也会融合，产物照玩家的 Atom 与费用规则来', () => {
-    const cleared = clearFloor(fresh(deckOf('strike')));
+    const cleared = withDeckbuild(clearFloor(fresh(deckOf('strike'))));
     const request = buildRequestOf(cleared, 'red-ring');
 
     const built = applyInput(cleared, {
@@ -1850,15 +1889,21 @@ describe('对手也在构筑', () => {
     expect(built.factionDecks['red-ring']).toContain(forged.id);
   });
 
-  it('没答完就开新层的话，按预设走，提问不会留到场上', () => {
-    let state = clearFloor(fresh(deckOf('strike')));
+  it('第 1 层它什么都没带——没问过就不该有', () => {
+    const opening = fresh(deckOf('strike'));
+    for (const combatant of opening.encounter.combatants) {
+      expect(combatant.actions.filter((a) => a.id.startsWith('card:'))).toHaveLength(0);
+    }
+  });
+
+  it('没答完就开新层的话什么都不带，提问也不会留到场上', () => {
+    let state = withDeckbuild(clearFloor(fresh(deckOf('strike'))));
     expect(state.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(true);
 
-    state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+    state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 21_000 });
 
     expect(state.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(false);
     const guard = state.encounter.combatants.find((c) => c.id === 'tower-guard')!;
-    // 预设那两张变成了它多出来的动作
-    expect(guard.actions.filter((a) => a.id.startsWith('card:')).length).toBeGreaterThan(0);
+    expect(guard.actions.filter((a) => a.id.startsWith('card:'))).toHaveLength(0);
   });
 });

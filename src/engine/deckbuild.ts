@@ -1,6 +1,7 @@
 import { effectsOf } from './atoms.js';
 import { CARD_POOL, baseCardsOf } from './content.js';
 import { summarizeMemory } from './memory.js';
+import { PLAYER_TARGET } from './types.js';
 import type { CardDefinition, CombatantAction, RunState } from './types.js';
 
 /**
@@ -34,13 +35,16 @@ export function presetDeckFor(factionId: string): readonly string[] {
 /**
  * 把一张 Card 翻成 Combatant 的一个动作。
  *
- * 数值走的是和玩家完全相同的 Atom 展开——它借走你的牌，就要照你的规则用。
+ * 伤害与格挡走的是和玩家完全相同的 Atom 展开——它借走你的牌，这两项就照你的规则用。
+ * 但 Combatant 的动作目前只有「攻击」和「防御」两种形状，所以灼烧、反伤、易伤这些
+ * 附带效果在这里被丢掉了：它拿到的是那张牌的骨架，不是全部。
  */
 export function actionFromCard(card: CardDefinition): CombatantAction | null {
   let damage = 0;
   let block = 0;
 
-  for (const effect of effectsOf(card.atoms, 'target')) {
+  // 只是为了把带目标的效果展开出来算数值，随便给个存在的目标即可。
+  for (const effect of effectsOf(card.atoms, PLAYER_TARGET)) {
     if (effect.kind === 'damage') damage += effect.amount * effect.hits;
     else if (effect.kind === 'gain_block') block += effect.amount;
   }
