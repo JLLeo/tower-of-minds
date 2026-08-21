@@ -289,7 +289,7 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
     case 'end_turn':
       return endTurn(state, input.atMs);
     case 'execution_input':
-      return resolvePending(state, input.atMs);
+      return recordPress(state, input.atMs);
     case 'agent_response':
       return receiveResponse(state, input.requestId, input.payload);
     case 'choose_favor':
@@ -309,19 +309,17 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
 
 // ---------------------------------------------------------------- Execution Check
 
-/**
- * 判定窗口内的分档，按窗口长度的比例给出，与具体 Card Type 无关——
- * #5 的节奏连击与蓄力沿用同一套分档，只换窗口长度与操作方式。
- */
-export const PERFECT_BAND = { start: 0.7, end: 0.85 } as const;
-export const GOOD_BAND = { start: 0.45, end: 1 } as const;
-
-/** Miss 只是打折，不反噬。 */
+/** Miss 只是打折，不反噬。Perfect 的倍率写在 spec 里——`focus` 会把它提到 2.0。 */
 export const GRADE_MULTIPLIER: Record<ExecutionGrade, number> = {
   miss: 0.5,
   good: 1,
   perfect: 1.5,
 };
+
+/** 这一次判定，各档的倍率。Perfect 那一档由这张牌的 Atom 决定。 */
+export function multiplierFor(spec: ExecutionSpec, grade: ExecutionGrade): number {
+  return grade === 'perfect' ? spec.perfectMultiplier : GRADE_MULTIPLIER[grade];
+}
 
 export const GRADE_LABEL: Record<ExecutionGrade, string> = {
   miss: '失手',
@@ -330,22 +328,49 @@ export const GRADE_LABEL: Record<ExecutionGrade, string> = {
 };
 
 /**
- * 把输入时刻在窗口里的位置换成档位。窗口外——太早，或者拖到窗口耗尽——都算 Miss。
+ * 把按下的那几个时刻换成档位。三种原型走的是同一段代码：**第 i 次按键对第 i 个
+ * 目标时刻**，每一次都够准才算那一档。
+ *
+ * 按少了（窗口耗尽时还没按满）、按多了（乱按），都是 Miss——节奏连击里「多按一下
+ * 也算过」会让这个原型退化成盲按。
+ *
+ * `reflex` 把 Miss 兜成 Good，但兜不出 Perfect：它买的是下限，不是上限。
  * 计算归引擎，UI 只上报时刻。
  */
-function gradeFor(spec: ExecutionSpec, elapsedMs: number): ExecutionGrade {
-  const progress = Math.max(0, elapsedMs) / spec.windowMs;
-  if (progress >= PERFECT_BAND.start && progress < PERFECT_BAND.end) return 'perfect';
-  if (progress >= GOOD_BAND.start && progress < GOOD_BAND.end) return 'good';
-  return 'miss';
+function gradeFor(spec: ExecutionSpec, presses: readonly number[]): ExecutionGrade {
+  const graded = rawGradeFor(spec, presses);
+  return graded === 'miss' && spec.softenMiss ? 'good' : graded;
 }
 
-/** 只缩放伤害与护体类效果——抽牌和能量不该因为手抖就变成半张牌。 */
+function rawGradeFor(spec: ExecutionSpec, presses: readonly number[]): ExecutionGrade {
+  if (presses.length !== spec.targets.length) return 'miss';
+
+  let worst: ExecutionGrade = 'perfect';
+  for (let i = 0; i < spec.targets.length; i++) {
+    const off = Math.abs(presses[i]! - spec.targets[i]!);
+    if (off > spec.goodTolerance) return 'miss';
+    if (off > spec.perfectTolerance) worst = 'good';
+  }
+  return worst;
+}
+
+/**
+ * 按档位缩放的效果。
+ *
+ * 抽牌、能量、取回也在内——法术类的判定原型（蓄力）否则就没有着落：现有的法术
+ * 全是这几种效果，档位对它们一点影响都没有的话，那一整个原型就是装饰。
+ *
+ * 缩放后至少是 1（见 scaleEffects）：手抖不该把一张牌变成半张牌，Miss 只是拿不到
+ * 完美蓄力的那份额外收益。开关类效果（易伤、弱化）没有数值，本来就不参与。
+ */
 const SCALABLE: ReadonlySet<Effect['kind']> = new Set([
   'damage',
   'gain_block',
   'gain_thorns',
   'apply_burn',
+  'draw_cards',
+  'gain_energy',
+  'recall_card',
 ]);
 
 function scaleEffects(effects: readonly Effect[], multiplier: number): readonly Effect[] {
@@ -526,6 +551,7 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
           spec: definition.execution,
           openedAtMs: atMs,
           remainingEffects: effects,
+          presses: [],
         },
       },
     };
@@ -735,13 +761,36 @@ function takeHit(
 
 // ---------------------------------------------------------------- 结算挂起的恢复
 
-function resolvePending(state: RunState, atMs: number): RunState {
+/**
+ * 记下一次按键。按满 targets 就当场结算，否则接着等下一拍。
+ *
+ * 多按的那一次也照记不误——记下来它才会让 presses 的长度超出 targets，判成 Miss。
+ * 悄悄丢掉多余的按键等于默许乱按。
+ */
+function recordPress(state: RunState, atMs: number): RunState {
   const encounter = state.encounter;
   const pending = encounter.pending;
   if (encounter.phase !== 'awaiting_execution' || !pending) return state;
 
-  const grade = gradeFor(pending.spec, atMs - pending.openedAtMs);
-  const multiplier = GRADE_MULTIPLIER[grade];
+  const at = Math.max(0, atMs - pending.openedAtMs) / pending.spec.windowMs;
+  const pressed: RunState = {
+    ...state,
+    encounter: { ...encounter, pending: { ...pending, presses: [...pending.presses, at] } },
+  };
+
+  // 还没按满就接着等——除非已经按超了，那就没什么可等的了。
+  if (pending.presses.length + 1 < pending.spec.targets.length) return pressed;
+  return resolvePending(pressed);
+}
+
+/** 结算挂起的那张牌。档位只看已经按下的那几次——时刻早就折进 presses 了。 */
+function resolvePending(state: RunState): RunState {
+  const encounter = state.encounter;
+  const pending = encounter.pending;
+  if (encounter.phase !== 'awaiting_execution' || !pending) return state;
+
+  const grade = gradeFor(pending.spec, pending.presses);
+  const multiplier = multiplierFor(pending.spec, grade);
 
   const resumed: RunState = {
     ...state,
@@ -761,7 +810,7 @@ function expireIfWindowClosed(state: RunState, atMs: number): RunState {
   const pending = state.encounter.pending;
   if (state.encounter.phase !== 'awaiting_execution' || !pending) return state;
   if (atMs - pending.openedAtMs < pending.spec.windowMs) return state;
-  return resolvePending(state, atMs);
+  return resolvePending(state);
 }
 
 // ---------------------------------------------------------------- 回合推进

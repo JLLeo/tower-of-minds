@@ -66,10 +66,11 @@ export const ATOMS: readonly AtomDefinition[] = [
   { id: 'expose', name: '破', axis: 'status', weight: 3, template: { kind: 'apply_expose' } },
   { id: 'weaken', name: '弱', axis: 'status', weight: 3, template: { kind: 'apply_weaken' } },
 
-  // 判定轴 —— 让 Execution Check 成为构筑的一部分。效果在 #5 落地。
-  { id: 'steady', name: '稳', axis: 'execution', weight: 2, flavor: '本次判定窗口 ×1.5', pendingTicket: '#5' },
-  { id: 'focus', name: '专', axis: 'execution', weight: 3, flavor: '本次 Perfect 倍率提到 2.0', pendingTicket: '#5' },
-  { id: 'reflex', name: '应', axis: 'execution', weight: 3, flavor: '本次即使 Miss 也按 Good 结算', pendingTicket: '#5' },
+  // 判定轴 —— 它们没有 Effect，改的是**这张牌怎么判**。所以 effectsOf 跳过它们，
+  // 由 executionFor 读进 ExecutionSpec：Execution Check 因此成了构筑的一部分。
+  { id: 'steady', name: '稳', axis: 'execution', weight: 2, flavor: '本次判定窗口 ×1.5' },
+  { id: 'focus', name: '专', axis: 'execution', weight: 3, flavor: '本次 Perfect 倍率提到 2.0' },
+  { id: 'reflex', name: '应', axis: 'execution', weight: 3, flavor: '本次即使 Miss 也按 Good 结算' },
 
   // 派系轴 —— 效果随 Standing 在 #8 落地。
   { id: 'parley', name: '交', axis: 'faction', weight: 3, template: { kind: 'parley' } },
