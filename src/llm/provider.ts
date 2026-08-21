@@ -1,4 +1,4 @@
-import { legalTargetsFor } from '../engine/agents.js';
+import { isActionable, legalTargetsFor } from '../engine/agents.js';
 import { ATOMS, atomOf, describeAtom, describeAtoms } from '../engine/atoms.js';
 import { CARD_POOL } from '../engine/content.js';
 import { memoryForPrompt, standingOf } from '../engine/memory.js';
@@ -162,11 +162,18 @@ export function taskFor(state: RunState, request: AgentRequest): AgentTask | und
         kind: 'intent',
         agent,
         combatant,
-        options: combatant.actions.map((action) => ({
-          actionId: action.id,
-          description: action.description,
-          targets: legalTargetsFor(state, combatant, action).map((id) => ({ id, name: nameOf(id) })),
-        })),
+        // 落不下去的动作不进合法集：同伴全倒下之后「护同伴」就没有对象了，
+        // 列出来只会诱导模型选一个引擎马上要拒绝的东西。
+        options: combatant.actions
+          .filter((action) => isActionable(state, combatant, action))
+          .map((action) => ({
+            actionId: action.id,
+            description: action.description,
+            targets: legalTargetsFor(state, combatant, action).map((id) => ({
+              id,
+              name: nameOf(id),
+            })),
+          })),
         memory: memoryForPrompt(state, combatant.factionId),
         standing: standingOf(state, combatant.factionId),
         allies: state.encounter.combatants

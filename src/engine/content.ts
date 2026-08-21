@@ -209,6 +209,9 @@ interface CombatantTemplate {
  * 不对等的话，「杀谁放谁」就不再是表态而是算术——人少血薄的那一方永远是更便宜的
  * 猎物，于是每一局都往同一个方向站队，而 Loadout 只能取自单个 Faction（#15），
  * 带另一派的牌进塔就等于白交一份难度税。
+ *
+ * 每个人都拿得出一个「替同伴挡一下」的动作。护的分量比自守小——照顾别人比照顾自己
+ * 难。它让一派内部也有关系，于是玩家先打谁多了一层考虑：谁在护着谁。
  */
 const ROSTER: readonly CombatantTemplate[] = [
   {
@@ -220,6 +223,7 @@ const ROSTER: readonly CombatantTemplate[] = [
       { id: 'slash', kind: 'attack', amount: 6, description: '挥刀劈砍，造成 6 点伤害' },
       { id: 'crush', kind: 'attack', amount: 10, description: '沉重的下劈，造成 10 点伤害' },
       { id: 'brace', kind: 'defend', amount: 5, description: '举盾自守，获得 5 点格挡' },
+      { id: 'shieldwall', kind: 'protect', amount: 4, description: '横盾挡在同伴身前，替他获得 4 点格挡' },
     ],
   },
   {
@@ -231,6 +235,7 @@ const ROSTER: readonly CombatantTemplate[] = [
       { id: 'loose', kind: 'attack', amount: 4, description: '放箭，造成 4 点伤害' },
       { id: 'volley', kind: 'attack', amount: 6, description: '压制射击，造成 6 点伤害' },
       { id: 'retreat', kind: 'defend', amount: 4, description: '后撤半步，获得 4 点格挡' },
+      { id: 'cover', kind: 'protect', amount: 3, description: '掩护射击，替同伴获得 3 点格挡' },
     ],
   },
   {
@@ -242,6 +247,7 @@ const ROSTER: readonly CombatantTemplate[] = [
       { id: 'lash', kind: 'attack', amount: 4, description: '藤鞭抽击，造成 4 点伤害' },
       { id: 'snare', kind: 'attack', amount: 6, description: '缠住对手狠抽，造成 6 点伤害' },
       { id: 'coil', kind: 'defend', amount: 6, description: '蜷起藤甲，获得 6 点格挡' },
+      { id: 'shelter', kind: 'protect', amount: 4, description: '把藤甲让给同伴，替他获得 4 点格挡' },
     ],
   },
   {
@@ -253,6 +259,7 @@ const ROSTER: readonly CombatantTemplate[] = [
       { id: 'weave', kind: 'attack', amount: 6, description: '藤蔓收束，造成 6 点伤害' },
       { id: 'entangle', kind: 'attack', amount: 10, description: '连根绞紧，造成 10 点伤害' },
       { id: 'root', kind: 'defend', amount: 5, description: '扎下根须，获得 5 点格挡' },
+      { id: 'graft', kind: 'protect', amount: 4, description: '藤蔓缠上同伴，替他获得 4 点格挡' },
     ],
   },
 ];
@@ -314,6 +321,7 @@ const LEADERS: Readonly<Record<string, LeaderTemplate>> = {
       { id: 'cleave', kind: 'attack', amount: 12, description: '横扫，造成 12 点伤害' },
       { id: 'execute', kind: 'attack', amount: 18, description: '行刑一击，造成 18 点伤害' },
       { id: 'aegis', kind: 'defend', amount: 10, description: '立盾，获得 10 点格挡' },
+      { id: 'bulwarkorder', kind: 'protect', amount: 7, description: '下令护住同伴，替他获得 7 点格挡' },
     ],
   },
   'green-vine': {
@@ -324,6 +332,7 @@ const LEADERS: Readonly<Record<string, LeaderTemplate>> = {
       { id: 'strangle', kind: 'attack', amount: 11, description: '绞缠，造成 11 点伤害' },
       { id: 'harvest', kind: 'attack', amount: 16, description: '收割，造成 16 点伤害' },
       { id: 'bulwark', kind: 'defend', amount: 12, description: '藤墙，获得 12 点格挡' },
+      { id: 'entwine', kind: 'protect', amount: 8, description: '藤墙分给同伴一段，替他获得 8 点格挡' },
     ],
   },
 };

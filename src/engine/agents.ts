@@ -450,9 +450,20 @@ export function legalTargetsFor(
   combatant: CombatantState,
   action: CombatantAction,
 ): readonly string[] {
-  // 打谁由 kind 推出，不另存一个可能与它矛盾的字段：防御只作用于自己。
+  // 打谁由 kind 推出，不另存一个可能与它矛盾的字段。
+
+  // 保护：只能给同派**活着的别人**。一个都没有时这个动作没有合法目标，
+  // 于是它整个不进合法集——引擎不会让模型选一个落不下去的动作。
+  if (action.kind === 'protect') {
+    return state.encounter.combatants
+      .filter((c) => c.hp > 0 && c.id !== combatant.id && c.factionId === combatant.factionId)
+      .map((c) => c.id);
+  }
+
+  // 自守只作用于自己。
   if (action.kind !== 'attack') return [];
-  // 围攻：各方暂时联手，这一场里它们只打你。
+
+  // 围攻：各方暂时联手，这一场里它们只打你。护同伴照旧——联手不等于互不相干。
   if (state.encounter.siege) return [PLAYER_TARGET];
   return [
     PLAYER_TARGET,
@@ -460,6 +471,21 @@ export function legalTargetsFor(
       .filter((c) => c.hp > 0 && c.factionId !== combatant.factionId)
       .map((c) => c.id),
   ];
+}
+
+/**
+ * 这个动作此刻落得下去吗。
+ *
+ * `protect` 在同伴全倒下之后就没有目标了，`attack` 在场上只剩自己人时也一样。
+ * 合法集与回退都得走这里，否则模型能选一个引擎结算不了的动作。
+ */
+export function isActionable(
+  state: RunState,
+  combatant: CombatantState,
+  action: CombatantAction,
+): boolean {
+  if (action.kind === 'defend') return true;
+  return legalTargetsFor(state, combatant, action).length > 0;
 }
 
 // ---------------------------------------------------------------- intent 的校验与回退
@@ -482,6 +508,10 @@ function parseIntent(
   if (!action) return null;
 
   // 目标同样要落在合法集里。模型想打一个不存在的、或者自己同派的目标，一律拒绝。
+  // 落不下去的动作一律拒绝。「护同伴」在同伴全倒下之后就是这样一个动作——
+  // 放它过去会变成一次「扑了个空」，看上去像引擎在糊弄人。
+  if (!isActionable(state, combatant, action)) return null;
+
   const legal = legalTargetsFor(state, combatant, action);
   let targetId: string | null = null;
   if (legal.length > 0) {
@@ -505,10 +535,12 @@ function parseIntent(
  */
 export function fallbackIntent(state: RunState, combatant: CombatantState): Intent {
   const wantsDefend = combatant.hp * 3 <= combatant.maxHp;
-  const preferred = combatant.actions.find(
+  // 落不下去的动作一个都不挑——同伴全倒了的时候「护同伴」就是这样一个动作。
+  const usable = combatant.actions.filter((action) => isActionable(state, combatant, action));
+  const preferred = usable.find(
     (action) => action.kind === (wantsDefend ? 'defend' : 'attack'),
   );
-  const action = preferred ?? combatant.actions[0];
+  const action = preferred ?? usable[0];
   if (!action || action.kind !== 'attack') {
     return { actionId: action?.id ?? '', targetId: null, line: '', source: 'fallback' };
   }

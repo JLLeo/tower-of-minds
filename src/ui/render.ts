@@ -353,13 +353,22 @@ function combatantsView(state: RunState, view: View): HTMLElement {
       const action = intendedAction(combatant);
       if (action) {
         const aim = combatant.intent?.targetId;
+        const aimName = aim
+          ? (state.encounter.combatants.find((c) => c.id === aim)?.name ?? aim)
+          : '';
+        // 护同伴用的是另一个动词——「攻向自己人」会把它读反
         const at =
-          aim && aim !== PLAYER_TARGET
-            ? `攻向${state.encounter.combatants.find((c) => c.id === aim)?.name ?? aim}：`
-            : aim === PLAYER_TARGET
-              ? '攻向你：'
-              : '';
-        card.appendChild(el('div', 'combatant-next', `意图：${at}${action.description}`));
+          aim === null || aim === undefined
+            ? ''
+            : action.kind === 'protect'
+              ? `护住${aimName}：`
+              : aim === PLAYER_TARGET
+                ? '攻向你：'
+                : `攻向${aimName}：`;
+        card.appendChild(
+          el('div', `combatant-next${action.kind === 'protect' ? ' combatant-guarding' : ''}`,
+            `意图：${at}${action.description}`),
+        );
         const line = combatant.intent?.line;
         if (line) card.appendChild(el('div', 'combatant-line', `「${line}」`));
       }

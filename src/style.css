@@ -438,3 +438,8 @@ button.loadout-tab:disabled {
   background: var(--ink);
   opacity: 0.55;
 }
+
+/* 有人在护着它。和「攻向」用不同的颜色，一眼能分开。 */
+.combatant-guarding {
+  color: #79a6d2;
+}
