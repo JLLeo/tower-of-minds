@@ -68,10 +68,15 @@ export interface CardInstance {
 
 // ---------------------------------------------------------------- Combatants
 
-/** Combatant 的动作库中的一项。合法动作集就是从这里来的。 */
+/**
+ * Combatant 的动作库中的一项。合法动作集就是从这里来的。
+ *
+ * 打谁由 kind 推出，不另存一个可能与它矛盾的字段：`attack` 打敌人与玩家，
+ * `defend` 只作用于自己，`protect` 把格挡给**同派的另一个人**。
+ */
 export interface CombatantAction {
   readonly id: string;
-  readonly kind: 'attack' | 'defend';
+  readonly kind: 'attack' | 'defend' | 'protect';
   readonly amount: number;
   /** 给模型和玩家看的说明。引擎结算只认 kind 和 amount，不解析这段文字。 */
   readonly description: string;

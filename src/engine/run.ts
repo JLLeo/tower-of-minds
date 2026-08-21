@@ -901,6 +901,8 @@ function endTurn(state: RunState, atMs: number): RunState {
   };
   const combatants = [...encounter.combatants];
   const journal = [...state.journal];
+  /** 这一轮谁替谁挡了多少。全场行动完才落下——见 protect 那一段的说明。 */
+  const warded: { id: string; amount: number }[] = [];
 
   for (let i = 0; i < combatants.length; i++) {
     const combatant = combatants[i];
@@ -922,6 +924,22 @@ function endTurn(state: RunState, atMs: number): RunState {
     if (action.kind === 'defend') {
       combatants[i] = { ...acted, block: action.amount };
       journal.push(`${combatant.name}架起 ${action.amount} 点格挡。`);
+      continue;
+    }
+
+    // 护同伴：格挡记在**别人**身上。
+    //
+    // 但不能当场加上去——每个人行动时都会把自己的 block 清零，所以护一个还没轮到
+    // 行动的人，那份格挡转眼就被它自己抹掉了。攒起来，全场行动完再一起落下。
+    if (action.kind === 'protect') {
+      combatants[i] = acted;
+      const ward = combatants.find((c) => c?.id === intent.targetId);
+      if (!ward || ward.hp <= 0) {
+        journal.push(`${combatant.name}扑了个空。`);
+        continue;
+      }
+      warded.push({ id: ward.id, amount: action.amount });
+      journal.push(`${combatant.name}替${ward.name}挡下 ${action.amount} 点。`);
       continue;
     }
 
@@ -958,6 +976,14 @@ function endTurn(state: RunState, atMs: number): RunState {
     journal.push(
       `${combatant.name}攻向${target.name}，造成 ${before - (combatants[targetIndex]?.hp ?? before)} 点伤害。`,
     );
+  }
+
+  // 攒下来的保护在这里落下：受保护的人这时已经行动过了，不会再把它清零。
+  for (const { id, amount } of warded) {
+    const index = combatants.findIndex((c) => c?.id === id);
+    const ward = index >= 0 ? combatants[index] : undefined;
+    if (!ward || ward.hp <= 0) continue;
+    combatants[index] = { ...ward, block: ward.block + amount };
   }
 
   // 回合末结算灼烧。灼烧是玩家打上去的，所以它造成的伤害也要记进站队账本。

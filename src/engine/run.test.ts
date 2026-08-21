@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { fallbackIntent, isActionable, legalTargetsFor } from './agents.js';
 import { forgeCard } from './fusion.js';
 import {
   applyInput,
@@ -33,6 +34,7 @@ import {
 import { PLAYER_TARGET } from './types.js';
 import type { AgentRequest, DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
 import type {
+  CombatantAction,
   CombatantState,
   ExecutionSpec,
   PlayerInput,
@@ -3023,6 +3025,196 @@ describe('Forbidden Atom（#17）', () => {
   it('禁忌 Atom 让牌更便宜：同样的效果，带上它费用更低', () => {
     for (const id of ['sacrifice', 'wild', 'greed']) {
       expect(costOf(['strike', 'strike', id])).toBeLessThanOrEqual(costOf(['strike', 'strike']));
+    }
+  });
+});
+
+describe('护同伴（#18）', () => {
+  const GUARD = 'tower-guard';
+
+  function fresh(options?: RunOptions): RunState {
+    return beginRun(SEED, { startedAtMs: 0, ...options });
+  }
+
+  /** 某个人的护同伴动作。每个人都拿得出一个。 */
+  function protectOf(state: RunState, combatantId: string): CombatantAction {
+    const combatant = state.encounter.combatants.find((c) => c.id === combatantId)!;
+    const action = combatant.actions.find((a) => a.kind === 'protect');
+    if (!action) throw new Error(combatantId + ' 不会护人');
+    return action;
+  }
+
+  function alliesOf(state: RunState, combatantId: string): readonly CombatantState[] {
+    const me = state.encounter.combatants.find((c) => c.id === combatantId)!;
+    return state.encounter.combatants.filter(
+      (c) => c.hp > 0 && c.id !== me.id && c.factionId === me.factionId,
+    );
+  }
+
+  it('格挡记在同伴身上，不是自己身上', () => {
+    const state = fresh();
+    const ward = alliesOf(state, GUARD)[0]!;
+    const action = protectOf(state, GUARD);
+
+    const acted = applyInput(
+      onlyOneActs(state, GUARD, { actionId: action.id, targetId: ward.id, line: '' }),
+      { type: 'end_turn', atMs: 1000 },
+    );
+
+    const guard = acted.encounter.combatants.find((c) => c.id === GUARD)!;
+    const guarded = acted.encounter.combatants.find((c) => c.id === ward.id)!;
+
+    expect(guard.block).toBe(0); // 护人的那个自己没捞到格挡
+    expect(guarded.block).toBeGreaterThanOrEqual(action.amount);
+  });
+
+  it('挡下的那几点真的顶住了玩家的攻击', () => {
+    const base = beginRun(SEED, ALL_STRIKES);
+    const ward = alliesOf(base, GUARD)[0]!;
+    const action = protectOf(base, GUARD);
+
+    // 一次没人护，一次有人护——除此之外两条路一模一样
+    const bare = applyInput(allDefend(base), { type: 'end_turn', atMs: 1000 });
+    const shielded = applyInput(
+      onlyOneActs(base, GUARD, { actionId: action.id, targetId: ward.id, line: '' }),
+      { type: 'end_turn', atMs: 1000 },
+    );
+
+    const strikeAt = (state: RunState): number => {
+      const after = settleGood(
+        applyInput(state, {
+          type: 'play_card',
+          instanceId: state.encounter.player.hand[0]!.instanceId,
+          atMs: 2000,
+          targetId: ward.id,
+        }),
+      );
+      return after.encounter.combatants.find((c) => c.id === ward.id)!.hp;
+    };
+
+    expect(strikeAt(shielded)).toBeGreaterThan(strikeAt(bare));
+  });
+
+  it('护的是同伴，敌人、自己、已倒下的人都不算数', () => {
+    const state = fresh();
+    const action = protectOf(state, GUARD);
+    const me = state.encounter.combatants.find((c) => c.id === GUARD)!;
+    const legal = legalTargetsFor(state, me, action);
+
+    expect(legal.length).toBeGreaterThan(0);
+    expect(legal).not.toContain(GUARD); // 不能护自己
+    expect(legal).not.toContain(PLAYER_TARGET);
+    for (const id of legal) {
+      const target = state.encounter.combatants.find((c) => c.id === id)!;
+      expect(target.factionId).toBe(me.factionId);
+      expect(target.hp).toBeGreaterThan(0);
+    }
+  });
+
+  it('同伴全倒下之后，这个动作整个不进合法集', () => {
+    const state = fresh();
+    const me = state.encounter.combatants.find((c) => c.id === GUARD)!;
+    const alone: RunState = {
+      ...state,
+      encounter: {
+        ...state.encounter,
+        combatants: state.encounter.combatants.map((c) =>
+          c.id !== GUARD && c.factionId === me.factionId ? { ...c, hp: 0 } : c,
+        ),
+      },
+    };
+
+    const action = protectOf(alone, GUARD);
+    const solo = alone.encounter.combatants.find((c) => c.id === GUARD)!;
+    expect(legalTargetsFor(alone, solo, action)).toHaveLength(0);
+    expect(isActionable(alone, solo, action)).toBe(false);
+
+    // 模型选了它也不算数——引擎拒绝并回退
+    const request = intentRequestsOf(alone).find((r) => r.combatantId === GUARD)!;
+    const answered = applyInput(alone, {
+      type: 'agent_response',
+      requestId: request.id,
+      payload: { actionId: action.id, targetId: solo.id, line: '' },
+    });
+    expect(answered.encounter.combatants.find((c) => c.id === GUARD)?.intent?.source).toBe(
+      'fallback',
+    );
+  });
+
+  it('回退永远不会挑一个落不下去的动作', () => {
+    const state = fresh();
+
+    // 常规局面：每个人的回退选择都落得下去
+    for (const combatant of state.encounter.combatants) {
+      const intent = fallbackIntent(state, combatant);
+      const action = combatant.actions.find((a) => a.id === intent.actionId)!;
+      expect(isActionable(state, combatant, action)).toBe(true);
+    }
+
+    // 真正会咬人的那种局面：动作表里护同伴排在最前，没有自守，同伴又全倒下了。
+    // 不过滤的话回退会挑中那个护同伴，然后「扑了个空」——看上去像引擎在糊弄人。
+    const me = state.encounter.combatants.find((c) => c.id === GUARD)!;
+    const cornered: RunState = {
+      ...state,
+      encounter: {
+        ...state.encounter,
+        combatants: state.encounter.combatants.map((c) => {
+          if (c.id === GUARD) {
+            return {
+              ...c,
+              hp: 1, // 血低到只想自保——但它没有自守动作
+              actions: [
+                c.actions.find((a) => a.kind === 'protect')!,
+                c.actions.find((a) => a.kind === 'attack')!,
+              ],
+            };
+          }
+          return c.factionId === me.factionId ? { ...c, hp: 0 } : c;
+        }),
+      },
+    };
+
+    const solo = cornered.encounter.combatants.find((c) => c.id === GUARD)!;
+    const intent = fallbackIntent(cornered, solo);
+    const action = solo.actions.find((a) => a.id === intent.actionId)!;
+
+    expect(action.kind).toBe('attack');
+    expect(isActionable(cornered, solo, action)).toBe(true);
+    expect(intent.targetId).not.toBeNull();
+  });
+
+  it('护同伴不会被同伴自己的行动抹掉——不管谁先动', () => {
+    // 每个人行动时都会把自己的 block 清零。护一个还没轮到行动的人，
+    // 那份格挡如果当场加上去，转眼就没了。
+    const state = fresh();
+    const first = state.encounter.combatants[0]!;
+    const ward = alliesOf(state, first.id)[0]!;
+    const action = protectOf(state, first.id);
+
+    const acted = applyInput(
+      answerAll(state, (id) =>
+        id === first.id
+          ? { actionId: action.id, targetId: ward.id, line: '' }
+          : defendPayload(state, id),
+      ),
+      { type: 'end_turn', atMs: 1000 },
+    );
+
+    const guarded = acted.encounter.combatants.find((c) => c.id === ward.id)!;
+    const own = ward.actions.find((a) => a.kind === 'defend')!.amount;
+    // 自守的那份加上别人护的那份，一份都没丢
+    expect(guarded.block).toBe(own + action.amount);
+  });
+
+  it('每个人都拿得出一个护同伴的动作，而且护得比自守少', () => {
+    const state = fresh();
+    for (const combatant of state.encounter.combatants) {
+      const protect = combatant.actions.find((a) => a.kind === 'protect');
+      const defend = combatant.actions.find((a) => a.kind === 'defend');
+      expect(protect).toBeDefined();
+      expect(defend).toBeDefined();
+      // 照顾别人比照顾自己难
+      expect(protect!.amount).toBeLessThan(defend!.amount);
     }
   });
 });
