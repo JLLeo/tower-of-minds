@@ -12,8 +12,9 @@ import {
 } from './run.js';
 import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
 import { BUILT_IN_GENERATION, CARD_POOL, STARTING_DECK } from './content.js';
+import { presetDeckFor } from './deckbuild.js';
 import { PLAYER_TARGET } from './types.js';
-import type { FusionRequest, IntentRequest } from './types.js';
+import type { DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
 const SEED = 20260818;
@@ -35,15 +36,30 @@ function pressAt(state: RunState, progress: number): PlayerInput {
 }
 
 /** 贪心策略：能打就打，挂起就用完美时机接上，打不动就结束回合。 */
-function scriptInputs(start: RunState, maxSteps = 500): PlayerInput[] {
+function scriptInputs(start: RunState, maxSteps = 3000): PlayerInput[] {
   const at = clock();
   let state = start;
   const inputs: PlayerInput[] = [];
 
   for (let i = 0; i < maxSteps && state.phase !== 'ended'; i++) {
+    // 层间的构筑提问：挑合法集里最前面的两张，模拟一个会用手边东西的对手。
+    const building = state.agentRequests.filter((r) => r.kind === 'deckbuild');
+    if (building.length > 0) {
+      for (const request of building) {
+        const answer: PlayerInput = {
+          type: 'agent_response',
+          requestId: request.id,
+          payload: { cardIds: request.legalCardIds.slice(0, request.capacity) },
+        };
+        inputs.push(answer);
+        state = applyInput(state, answer);
+      }
+      continue;
+    }
+
     // 场上有敌对派系就先打对方——这是实测到的真实模型行为，而不是回退那种
     // 「所有人都打玩家」的最坏情况。不这么做，测的就不是这个游戏。
-    if (state.agentRequests.length > 0) {
+    if (intentRequestsOf(state).length > 0) {
       for (const request of intentRequestsOf(state)) {
         const me = state.encounter.combatants.find((c) => c.id === request.combatantId);
         const rival = state.encounter.combatants.find(
@@ -1152,10 +1168,24 @@ describe('多 Floor 推进与 Favor', () => {
     ).toBe(cleared);
   });
 
-  it('选 Favor 的时候别的输入都不生效', () => {
+  it('选 Favor 的时候玩家的别的输入都不生效，但对手照常在忙', () => {
     const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+
+    // 玩家这边：除了选 Favor 和发起融合，什么都不生效
     expect(applyInput(cleared, { type: 'end_turn', atMs: 20_000 })).toBe(cleared);
-    expect(applyInput(cleared, { type: 'tick', atMs: 99_999 })).toBe(cleared);
+    expect(
+      applyInput(cleared, { type: 'play_card', instanceId: 'strike#0', atMs: 20_000 }),
+    ).toBe(cleared);
+
+    // 对手这边：层间构筑是并行的，模型的回答与时间流逝照常放行
+    expect(cleared.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(true);
+    const built = applyInput(cleared, {
+      type: 'agent_response',
+      requestId: cleared.agentRequests[0]!.id,
+      payload: { cardIds: [] },
+    });
+    expect(built).not.toBe(cleared);
+    expect(built.phase).toBe('choosing_favor'); // 但它没有把玩家推走
   });
 
   it('同向站队两次就跨过阈值，Favor 升到高阶', () => {
@@ -1650,5 +1680,185 @@ describe('Fusion 与 Mutation', () => {
 
     expect(state.phase).toBe('ended');
     expect(state.forged).toHaveLength(0);
+  });
+});
+
+describe('对手也在构筑', () => {
+  const fresh = (options?: RunOptions): RunState =>
+    startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+
+  /** 打光青蔓这一派，清掉当前这一层；赤环一直自守。 */
+  function clearFloor(state: RunState): RunState {
+    let next = state;
+    for (let turn = 0; turn < 40 && next.phase === 'in_encounter'; turn++) {
+      next = answerAll(next, (id) => ({
+        actionId: DEFEND[id.replace('-reinforcement', '')],
+        line: '',
+      }));
+      while (next.encounter.phase === 'player_turn') {
+        const card = next.encounter.player.hand.find((c) => canPlay(next, c.instanceId));
+        const victim = next.encounter.combatants.find(
+          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        );
+        if (!card || !victim) break;
+        next = applyInput(next, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: victim.id,
+        });
+      }
+      if (next.phase !== 'in_encounter') break;
+      next = applyInput(next, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+    return next;
+  }
+
+  const buildRequestOf = (state: RunState, factionId: string): DeckbuildRequest =>
+    state.agentRequests.find(
+      (r): r is DeckbuildRequest => r.kind === 'deckbuild' && r.factionId === factionId,
+    )!;
+
+  it('清完一层就为下一层挂出构筑提问，和玩家挑 Favor 并行', () => {
+    const cleared = clearFloor(fresh(deckOf('strike')));
+
+    expect(cleared.phase).toBe('choosing_favor');
+    for (const agent of cleared.agents) {
+      const request = buildRequestOf(cleared, agent.factionId);
+      expect(request).toBeDefined();
+      expect(request.forFloor).toBe(2);
+      expect(request.capacity).toBeGreaterThan(0);
+    }
+  });
+
+  it('合法牌集 = 自己的家底 + 它亲眼见过你打的牌', () => {
+    const cleared = clearFloor(fresh(deckOf('strike')));
+    const request = buildRequestOf(cleared, 'red-ring');
+
+    // 自己派系的每一张都在
+    for (const card of CARD_POOL.filter((c) => c.faction === 'red-ring')) {
+      expect(request.legalCardIds).toContain(card.id);
+    }
+    // 玩家在它面前打过劈砍，所以它拿得到
+    expect(request.legalCardIds).toContain('strike');
+  });
+
+  it('藏牌真的有效：没在它面前打过的牌不会进它的合法集', () => {
+    // 刻意只打劈砍，格挡与重击一张都不打——它们全程留在手上或牌堆里。
+    let state = fresh({
+      startingDeck: ['strike', 'strike', 'strike', 'strike', 'strike', 'guard', 'guard', 'guard', 'guard', 'heavy'],
+      startedAtMs: 0,
+    });
+
+    for (let turn = 0; turn < 40 && state.phase === 'in_encounter'; turn++) {
+      state = answerAll(state, (id) => ({
+        actionId: DEFEND[id.replace('-reinforcement', '')],
+        line: '',
+      }));
+      while (state.encounter.phase === 'player_turn') {
+        const card = state.encounter.player.hand.find(
+          (c) => c.instanceId.startsWith('strike#') && canPlay(state, c.instanceId),
+        );
+        const victim = state.encounter.combatants.find(
+          (c) => c.hp > 0 && c.factionId === 'green-vine',
+        );
+        if (!card || !victim) break;
+        state = applyInput(state, {
+          type: 'play_card',
+          instanceId: card.instanceId,
+          atMs: 100 * turn + 1,
+          targetId: victim.id,
+        });
+      }
+      if (state.phase !== 'in_encounter') break;
+      state = applyInput(state, { type: 'end_turn', atMs: 1000 * (turn + 1) });
+    }
+
+    expect(state.phase).toBe('choosing_favor');
+    // 对赤环断言：格挡是青蔓的家底，赤环只可能从「见过玩家打出」这条路拿到它
+    const request = buildRequestOf(state, 'red-ring');
+
+    expect(request.legalCardIds).toContain('strike'); // 见过，而且本来就是它的
+    // 玩家牌库里有四张格挡，但一张都没打出去——赤环因此无从知道
+    expect(state.deck.some((c) => c.definitionId === 'guard')).toBe(true);
+    expect(request.legalCardIds).not.toContain('guard');
+  });
+
+  it('它挑的牌变成下一层多出来的动作，数值照玩家的规则算', () => {
+    let state = clearFloor(fresh(deckOf('strike')));
+    const request = buildRequestOf(state, 'red-ring');
+
+    state = applyInput(state, {
+      type: 'agent_response',
+      requestId: request.id,
+      payload: { cardIds: ['strike'] }, // 它学会了你的劈砍
+    });
+    // 另一派按预设走
+    const other = buildRequestOf(state, 'green-vine');
+    state = applyInput(state, {
+      type: 'agent_response',
+      requestId: other.id,
+      payload: { cardIds: [] },
+    });
+
+    state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+
+    const guard = state.encounter.combatants.find((c) => c.id === 'tower-guard')!;
+    const learned = guard.actions.find((a) => a.id === 'card:strike');
+    expect(learned).toBeDefined();
+    expect(learned?.kind).toBe('attack');
+    expect(learned?.amount).toBe(6); // 劈砍就是 6 点，和玩家手里一模一样
+  });
+
+  it('三条回退路径：超时、非法选择、畸形响应，一律退回固定预设', () => {
+    const cleared = clearFloor(fresh(deckOf('strike')));
+    const request = buildRequestOf(cleared, 'red-ring');
+    const preset = presetDeckFor('red-ring');
+
+    const outcomes = [
+      applyInput(cleared, { type: 'tick', atMs: request.requestedAtMs + request.timeoutMs }),
+      applyInput(cleared, {
+        type: 'agent_response',
+        requestId: request.id,
+        payload: { cardIds: ['truce', '不存在的牌'] }, // 青蔓的牌，它拿不到
+      }),
+      applyInput(cleared, { type: 'agent_response', requestId: request.id, payload: 'nonsense' }),
+    ];
+
+    for (const outcome of outcomes) {
+      expect(outcome.factionDecks['red-ring']).toEqual(preset);
+      expect(outcome.phase).toBe('choosing_favor'); // Run 继续
+    }
+  });
+
+  it('它也会融合，产物照玩家的 Atom 与费用规则来', () => {
+    const cleared = clearFloor(fresh(deckOf('strike')));
+    const request = buildRequestOf(cleared, 'red-ring');
+
+    const built = applyInput(cleared, {
+      type: 'agent_response',
+      requestId: request.id,
+      payload: { cardIds: ['strike', 'heavy'], fuse: ['strike', 'heavy'], name: '双刃' },
+    });
+
+    expect(built.forged).toHaveLength(1);
+    const forged = built.forged[0]!;
+    expect(forged.name).toBe('双刃');
+    expect(forged.faction).toBe('red-ring');
+    expect(forged.cost).toBe(costOf(forged.atoms));
+    expect(forged.atoms.length).toBeLessThanOrEqual(MAX_ATOMS_PER_CARD);
+    expect(built.factionDecks['red-ring']).toContain(forged.id);
+  });
+
+  it('没答完就开新层的话，按预设走，提问不会留到场上', () => {
+    let state = clearFloor(fresh(deckOf('strike')));
+    expect(state.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(true);
+
+    state = applyInput(state, { type: 'choose_favor', cardId: null, atMs: 20_000 });
+
+    expect(state.agentRequests.some((r) => r.kind === 'deckbuild')).toBe(false);
+    const guard = state.encounter.combatants.find((c) => c.id === 'tower-guard')!;
+    // 预设那两张变成了它多出来的动作
+    expect(guard.actions.filter((a) => a.id.startsWith('card:')).length).toBeGreaterThan(0);
   });
 });

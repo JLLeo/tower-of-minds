@@ -1,8 +1,15 @@
 import { atomOf } from './atoms.js';
-import { FUSION_TIMEOUT_MS, INTENT_TIMEOUT_MS } from './content.js';
+import {
+  CARD_POOL,
+  DECKBUILD_TIMEOUT_MS,
+  FUSION_TIMEOUT_MS,
+  INTENT_TIMEOUT_MS,
+} from './content.js';
+import { DECK_CAPACITY, legalCardsFor, presetDeckFor } from './deckbuild.js';
 import {
   applyForge,
   fallbackName,
+  forgeCard,
   preferredForbidden,
   sanitizeName,
   trimToCapacity,
@@ -13,6 +20,7 @@ import type {
   AgentRequestKind,
   CombatantAction,
   CombatantState,
+  DeckbuildRequest,
   FusionRequest,
   Intent,
   RunState,
@@ -117,7 +125,111 @@ function settle(
       return settleIntent(withoutRequest, request.combatantId, payload, timedOut);
     case 'fusion':
       return settleFusion(withoutRequest, request, payload, timedOut);
+    case 'deckbuild':
+      return settleDeckbuild(withoutRequest, request, payload, timedOut);
   }
+}
+
+// ---------------------------------------------------------------- deckbuild
+
+/**
+ * 挂出一次层间构筑：这一派为下一层挑几张牌。
+ *
+ * 它和玩家挑 Favor 是并行的——玩家在层间做自己的选择时，对手也在做它的。
+ * 等玩家上楼时它已经准备好了，谁都不用等谁。
+ */
+export function openDeckbuildRequests(state: RunState, forFloor: number, atMs: number): RunState {
+  const added: AgentRequest[] = [];
+  let seq = state.nextRequestSeq;
+
+  for (const agent of state.agents) {
+    added.push({
+      kind: 'deckbuild',
+      id: `r${seq++}`,
+      factionId: agent.factionId,
+      requestedAtMs: atMs,
+      timeoutMs: DECKBUILD_TIMEOUT_MS,
+      legalCardIds: legalCardsFor(state, agent.factionId),
+      capacity: DECK_CAPACITY,
+      forFloor,
+    });
+  }
+
+  if (added.length === 0) return state;
+  return {
+    ...state,
+    nextRequestSeq: seq,
+    agentRequests: [...state.agentRequests, ...added],
+  };
+}
+
+/**
+ * 校验它挑的牌（ADR-0001）。合法集就是 legalCardIds——它没见过的牌一张都拿不到，
+ * 越界的一律丢掉。全都不合法就退回这一派的固定预设。
+ *
+ * 它也可以顺手把挑到的两张融了：走的是和玩家完全相同的合并与上限规则。
+ */
+function settleDeckbuild(
+  state: RunState,
+  request: DeckbuildRequest,
+  payload: unknown,
+  timedOut: boolean,
+): RunState {
+  const record =
+    !timedOut && typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>)
+      : {};
+
+  const proposed = Array.isArray(record['cardIds']) ? (record['cardIds'] as unknown[]) : [];
+  const picked = proposed
+    .filter((id): id is string => typeof id === 'string' && request.legalCardIds.includes(id))
+    .slice(0, request.capacity);
+
+  const chosen = picked.length > 0 ? picked : presetDeckFor(request.factionId);
+  const who = state.agents.find((a) => a.factionId === request.factionId)?.name ?? '对方';
+
+  // 它也想把这两张融了。合并与上限规则和玩家的完全一致。
+  const fuse = record['fuse'];
+  const pair =
+    Array.isArray(fuse) && fuse.length === 2 && fuse.every((id) => typeof id === 'string')
+      ? (fuse as string[]).filter((id) => chosen.includes(id))
+      : [];
+
+  if (pair.length === 2) {
+    const a = cardDefinitionOf(state, pair[0]!);
+    const b = cardDefinitionOf(state, pair[1]!);
+    if (a && b) {
+      const atoms = trimToCapacity(request.factionId, [...a.atoms, ...b.atoms]);
+      const forged = forgeCard({
+        atoms,
+        name: sanitizeName(record['name'], fallbackName(a.name, b.name, false)),
+        factionId: request.factionId,
+        seq: state.forged.length,
+      });
+      const rest = chosen.filter((id) => id !== pair[0] && id !== pair[1]);
+      return {
+        ...state,
+        forged: [...state.forged, forged],
+        factionDecks: { ...state.factionDecks, [request.factionId]: [...rest, forged.id] },
+        journal: [...state.journal, `${who}把两张牌融成了「${forged.name}」。`],
+      };
+    }
+  }
+
+  const note =
+    picked.length > 0
+      ? `${who}为下一层备好了牌。`
+      : `${who}没有给出说得通的构筑，按老一套准备。`;
+
+  return {
+    ...state,
+    factionDecks: { ...state.factionDecks, [request.factionId]: chosen },
+    journal: [...state.journal, note],
+  };
+}
+
+function cardDefinitionOf(state: RunState, id: string) {
+  return CARD_POOL.find((c) => c.id === id) ?? state.forged.find((c) => c.id === id);
 }
 
 // ---------------------------------------------------------------- fusion

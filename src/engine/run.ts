@@ -12,10 +12,12 @@ import {
   dropRequests,
   expireRequests,
   fallbackIntent,
+  openDeckbuildRequests,
   openFusionRequest,
   openIntentRequests,
   receiveResponse,
 } from './agents.js';
+import { extraActionsFor, presetDeckFor } from './deckbuild.js';
 import { applyForge, exceedsCapacity, fallbackName, mergeAtoms } from './fusion.js';
 import { PLAYER_TARGET } from './types.js';
 import {
@@ -76,6 +78,7 @@ export function startRun(
     floor: 0,
     deck,
     forged: [],
+    factionDecks: {},
     memories: {},
     favor: null,
     phase: 'in_encounter',
@@ -136,19 +139,31 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
   };
   const [rng, player] = draw(rngAfterShuffle, fresh, HAND_SIZE);
 
+  const startingFloor = dropRequests(state);
   return openIntentRequests(
     {
-      ...state,
+      ...startingFloor,
       rng,
       floor,
       favor: null,
       phase: 'in_encounter',
       journal: [...state.journal, `第 ${floor} 层。`],
+      // 层间备好的牌在这里兑现：它学会的东西变成多出来的动作。没答上来就按预设走。
+      factionDecks: {},
       encounter: {
         turn: 1,
         phase: 'player_turn',
         player,
-        combatants: combatantsForFloor(floor, offendedFactions(state)),
+        combatants: combatantsForFloor(floor, offendedFactions(state)).map((combatant) => ({
+          ...combatant,
+          actions: [
+            ...combatant.actions,
+            ...extraActionsFor(
+              state,
+              state.factionDecks[combatant.factionId] ?? presetDeckFor(combatant.factionId),
+            ),
+          ],
+        })),
         pending: null,
         damageDealtTo: {},
         executionUsedThisTurn: false,
@@ -161,9 +176,15 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
 
 export function applyInput(state: RunState, input: PlayerInput): RunState {
   if (state.phase === 'ended') return state;
-  // 层间：选 Favor 的时候只能选 Favor 或发起融合；等这一方取舍时什么都做不了，
-  // 除了让时间流逝（超时由 tick 判）。
-  if (state.phase === 'choosing_favor' && input.type !== 'choose_favor' && input.type !== 'fuse') {
+  // 层间：玩家只能选 Favor 或发起融合。但对手的层间构筑是**并行**发生的，
+  // 所以模型的回答与时间流逝照常放行——谁都不该被对方的界面挡住。
+  if (
+    state.phase === 'choosing_favor' &&
+    input.type !== 'choose_favor' &&
+    input.type !== 'fuse' &&
+    input.type !== 'agent_response' &&
+    input.type !== 'tick'
+  ) {
     return state;
   }
   if (state.phase === 'fusing' && input.type !== 'agent_response' && input.type !== 'tick') {
@@ -853,15 +874,20 @@ function clearFloor(state: RunState): RunState {
   const offer = buildFavor(remembered, factionId);
   const agentName = remembered.agents.find((a) => a.factionId === factionId)?.name;
 
-  return {
-    ...remembered,
-    phase: 'choosing_favor',
-    favor: offer,
-    journal: [
-      ...remembered.journal,
-      agentName ? `${agentName}记下了你这一场的选择。` : '没有哪一方觉得欠你人情。',
-    ],
-  };
+  // 对手为下一层构筑，和玩家挑 Favor 并行——谁都不用等谁。
+  return openDeckbuildRequests(
+    {
+      ...remembered,
+      phase: 'choosing_favor',
+      favor: offer,
+      journal: [
+        ...remembered.journal,
+        agentName ? `${agentName}记下了你这一场的选择。` : '没有哪一方觉得欠你人情。',
+      ],
+    },
+    remembered.floor + 1,
+    remembered.encounter.turn * 1000,
+  );
 }
 
 /**

@@ -197,6 +197,14 @@ function combatantsView(state: RunState, view: View): HTMLElement {
     card.appendChild(meter('HP', combatant.hp, combatant.maxHp, 'fill-hp'));
     if (combatant.block > 0) card.appendChild(el('div', 'block-badge', `格挡 ${combatant.block}`));
 
+    // 它这一层带上来的牌。玩家看得见自己教会了它什么。
+    const learned = combatant.actions.filter((action) => action.id.startsWith('card:'));
+    if (learned.length > 0 && !down) {
+      card.appendChild(
+        el('div', 'combatant-learned', `带着：${learned.map((a) => a.description).join('；')}`),
+      );
+    }
+
     if (down) {
       card.appendChild(el('div', 'combatant-next', '已倒下'));
     } else {

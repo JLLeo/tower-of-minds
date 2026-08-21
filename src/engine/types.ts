@@ -113,7 +113,7 @@ export interface AgentState {
  * Fusion（#13）与层间构筑（#14）各自加一个 kind——suspend / validate / fallback
  * 这条路只写一份（ADR-0010）。
  */
-export type AgentRequestKind = 'intent' | 'fusion';
+export type AgentRequestKind = 'intent' | 'fusion' | 'deckbuild';
 
 export interface AgentRequestBase {
   /** 唯一标识这一次提问。响应靠它认领，迟到的响应因此认得出来。 */
@@ -143,7 +143,22 @@ export interface FusionRequest extends AgentRequestBase {
   readonly deckInstanceId: string;
 }
 
-export type AgentRequest = IntentRequest | FusionRequest;
+/**
+ * 层间为自己构筑：从合法牌集里挑几张带上下一层，也可以把其中两张融了。
+ *
+ * 合法牌集只有两个来源——它自己 Faction 的 Base Card，以及**玩家在它面前打出过的牌**。
+ * 它没见过的东西不在里面，所以藏牌是玩家真实可用的反制。
+ */
+export interface DeckbuildRequest extends AgentRequestBase {
+  readonly kind: 'deckbuild';
+  readonly legalCardIds: readonly string[];
+  /** 最多能带几张。 */
+  readonly capacity: number;
+  /** 这一份构筑是为哪一层准备的。 */
+  readonly forFloor: number;
+}
+
+export type AgentRequest = IntentRequest | FusionRequest | DeckbuildRequest;
 
 /**
  * Player 目前单独建模，因为只有他持有 Deck。#6 的多方混战会让 Player 也变成
@@ -301,6 +316,11 @@ export interface RunState {
    * （ADR-0009）。查一张牌的定义要同时看固定卡池和这里。
    */
   readonly forged: readonly CardDefinition[];
+  /**
+   * 每个 Faction 为下一层挑好的牌。它们会变成那一层里这一派 Combatant 多出来的动作——
+   * 玩家因此看得见自己教会了它什么。
+   */
+  readonly factionDecks: Readonly<Record<string, readonly string[]>>;
   readonly phase: RunPhase;
   readonly encounter: EncounterState;
   readonly outcome: RunOutcome | null;

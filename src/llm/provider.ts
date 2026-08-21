@@ -1,5 +1,6 @@
 import { legalTargetsFor } from '../engine/agents.js';
-import { ATOMS, atomOf, describeAtom } from '../engine/atoms.js';
+import { ATOMS, atomOf, describeAtom, describeAtoms } from '../engine/atoms.js';
+import { CARD_POOL } from '../engine/content.js';
 import { memoryForPrompt, standingOf } from '../engine/memory.js';
 import { PLAYER_TARGET } from '../engine/types.js';
 import type { AgentRequest, AgentState, CombatantState, RunState } from '../engine/types.js';
@@ -22,9 +23,19 @@ export interface AtomOption {
   readonly weight: number;
 }
 
-export type AgentTask =
-  | IntentTask
-  | FusionTask;
+export type AgentTask = IntentTask | FusionTask | DeckbuildTask;
+
+/** 层间构筑：从合法牌集里挑几张带上下一层，也可以顺手把其中两张融了。 */
+export interface DeckbuildTask {
+  readonly kind: 'deckbuild';
+  readonly agent: AgentState;
+  readonly memory: string;
+  readonly standing: number;
+  readonly forFloor: number;
+  readonly capacity: number;
+  /** 合法牌集。它没见过的牌不在这里——藏牌因此是玩家真实可用的反制。 */
+  readonly cards: readonly { readonly id: string; readonly name: string; readonly text: string }[];
+}
 
 export interface IntentTask {
   readonly kind: 'intent';
@@ -74,6 +85,27 @@ export function taskFor(state: RunState, request: AgentRequest): AgentTask | und
   if (!agent) return undefined;
 
   switch (request.kind) {
+    case 'deckbuild': {
+      const cards = request.legalCardIds
+        .map((id) => CARD_POOL.find((card) => card.id === id) ?? state.forged.find((c) => c.id === id))
+        .filter((card): card is NonNullable<typeof card> => card !== undefined)
+        .map((card) => ({
+          id: card.id,
+          name: `${card.name}（${card.cost} 费）`,
+          text: describeAtoms(card.atoms),
+        }));
+
+      return {
+        kind: 'deckbuild',
+        agent,
+        memory: memoryForPrompt(state, request.factionId),
+        standing: standingOf(state, request.factionId),
+        forFloor: request.forFloor,
+        capacity: request.capacity,
+        cards,
+      };
+    }
+
     case 'fusion': {
       const describe = (id: string): AtomOption | null => {
         const atom = atomOf(id);

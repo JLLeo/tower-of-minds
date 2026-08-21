@@ -2,6 +2,8 @@ import { atomTableForPrompt, describeAtoms } from '../engine/atoms.js';
 import { CARD_POOL } from '../engine/content.js';
 import type { AgentProvider, AgentTask } from './provider.js';
 
+const NEWLINE = String.fromCharCode(10);
+
 const CARD_POOL_LINES = CARD_POOL.map(
   (card) => `- ${card.name}（${card.cost} 费）：${describeAtoms(card.atoms)}`,
 ).join('\n');
@@ -39,6 +41,23 @@ function userPrompt(task: AgentTask): string {
 ${task.memory}`;
 
   switch (task.kind) {
+    case 'deckbuild': {
+      const list = task.cards.map((c) => `- ${c.id}｜${c.name}：${c.text}`).join(NEWLINE);
+      return `${persona}
+
+外来者就要上到第 ${task.forFloor} 层了。趁现在给自己备牌。
+下面是你**拿得到**的牌：你自己派系的家底，加上你亲眼见过他打出来的那些。
+你没见过的东西不在这里——他藏着的牌，你无从知道。
+
+最多带 ${task.capacity} 张。挑什么反映你打算怎么对付他。
+如果你觉得两张合起来更趁手，可以把它们融了。
+
+${list}
+
+用 JSON 回答：{"cardIds": ["<上面的 id>", …]}
+想融合就再加两个字段：{"fuse": ["<id>", "<id>"], "name": "<不超过 6 个字的牌名>"}`;
+    }
+
     case 'fusion': {
       const [a, b] = task.sourceNames;
       const list = (options: readonly { id: string; name: string; description: string; weight: number }[]): string =>

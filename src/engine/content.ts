@@ -248,6 +248,12 @@ export const INTENT_TIMEOUT_MS = 2500;
 /** 一次融合提问允许等待多久。玩家在层间干等着，所以留的余量比战斗里更大一点。 */
 export const FUSION_TIMEOUT_MS = 3500;
 
+/**
+ * 层间构筑允许等待多久。它和玩家挑 Favor 是并行的，谁都不等谁，
+ * 所以这里可以给得很宽松——真到开新层还没回来，就按预设走。
+ */
+export const DECKBUILD_TIMEOUT_MS = 6000;
+
 /** Generation 失败时的内置局势，也是本票唯一的局势（#10 起才真正生成）。 */
 export const BUILT_IN_GENERATION: Generation = {
   title: '围城中的塔',

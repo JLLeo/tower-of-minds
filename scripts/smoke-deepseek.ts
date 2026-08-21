@@ -15,6 +15,7 @@ import { applyInput, startRun } from '../src/engine/run.js';
 import { BUILT_IN_GENERATION } from '../src/engine/content.js';
 import { createDeepSeekProvider } from '../src/llm/deepseek.js';
 import { taskFor } from '../src/llm/provider.js';
+import { legalCardsFor } from '../src/engine/deckbuild.js';
 
 try {
   process.loadEnvFile('.env');
@@ -26,6 +27,7 @@ const apiKey = process.env['DEEPSEEK_API_KEY'];
 const baseUrl = process.env['DEEPSEEK_BASE_URL'] ?? 'https://api.deepseek.com';
 const model = process.env['DEEPSEEK_INTENT_MODEL'] ?? 'deepseek-v4-flash';
 const rounds = Number(process.argv[2] ?? 5);
+const NEWLINE = String.fromCharCode(10);
 
 if (!apiKey) {
   console.error('缺少 DEEPSEEK_API_KEY。把 .env.example 复制成 .env 并填入 key。');
@@ -113,6 +115,52 @@ for (const factionId of ['red-ring', 'green-vine']) {
     console.log(
       `  ${who}  ${Math.round(performance.now() - startedAt)}ms  ` +
         `${legal ? '合法' : '非法'}  丢掉 ${String(drop)}  取名「${String(payload?.['name'])}」`,
+    );
+  } catch (error) {
+    console.log(`  ${factionId} 调用失败 :: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+// 层间构筑：它会不会挑走你在它面前打过的牌？这是「对手也在构筑」唯一重要的问题。
+console.log(NEWLINE + '— 层间构筑 —');
+for (const factionId of ['red-ring', 'green-vine']) {
+  const base = startRun(BUILT_IN_GENERATION, 2, { startedAtMs: 0 });
+  // 假装玩家在它面前打过赤环的重击与青蔓的荆棘
+  const seen: RunState = {
+    ...base,
+    memories: {
+      [factionId]: [
+        { kind: 'card_played', floor: 1, cardId: 'heavy' },
+        { kind: 'card_played', floor: 1, cardId: 'bramble' },
+        { kind: 'harmed', floor: 1, amount: 24 },
+      ],
+    },
+  };
+  const request = {
+    kind: 'deckbuild' as const,
+    id: 'smoke-deck',
+    factionId,
+    requestedAtMs: 0,
+    timeoutMs: 6000,
+    legalCardIds: legalCardsFor(seen, factionId),
+    capacity: 2,
+    forFloor: 2,
+  };
+  const task = taskFor({ ...seen, agentRequests: [request] }, request);
+  if (!task) continue;
+
+  const startedAt = performance.now();
+  try {
+    const payload = (await provider.ask(task, new AbortController().signal)) as Record<string, unknown>;
+    const picked = Array.isArray(payload?.['cardIds']) ? (payload['cardIds'] as string[]) : [];
+    const legal = picked.every((id) => request.legalCardIds.includes(id));
+    const stolen = picked.filter((id) => id === 'heavy' || id === 'bramble');
+    const who = seen.agents.find((a) => a.factionId === factionId)?.name;
+    console.log(
+      `  ${who}  ${Math.round(performance.now() - startedAt)}ms  ${legal ? '合法' : '非法'}  ` +
+        `带上 ${picked.join('、') || '—'}` +
+        (stolen.length > 0 ? `　←　其中 ${stolen.join('、')} 是从你这儿学的` : '') +
+        (payload?.['fuse'] ? `　并融成「${String(payload['name'])}」` : ''),
     );
   } catch (error) {
     console.log(`  ${factionId} 调用失败 :: ${error instanceof Error ? error.message : error}`);
