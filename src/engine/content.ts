@@ -183,7 +183,7 @@ export function builtInAgents(): readonly AgentState[] {
       persona: '谨慎，记仇，擅长等别人先出手。',
       goal:
         '保住补给线。赤环封死了塔道、还想拿你当叛徒办，你恨他们更甚于恨外来者——' +
-        '只是你人手不够，得等一个他们分神的时机。',
+        '你不缺人手，缺的是一个他们分神的时机。',
     },
   ];
 }
@@ -203,15 +203,22 @@ interface CombatantTemplate {
   readonly actions: readonly CombatantAction[];
 }
 
+/**
+ * 每层站着的人。**两派必须对等**：同样的人数、大致相同的总血量与出手量。
+ *
+ * 不对等的话，「杀谁放谁」就不再是表态而是算术——人少血薄的那一方永远是更便宜的
+ * 猎物，于是每一局都往同一个方向站队，而 Loadout 只能取自单个 Faction（#15），
+ * 带另一派的牌进塔就等于白交一份难度税。
+ */
 const ROSTER: readonly CombatantTemplate[] = [
   {
     id: 'tower-guard',
     role: '塔卫',
     factionId: 'red-ring',
-    hp: 34,
+    hp: 15,
     actions: [
-      { id: 'slash', kind: 'attack', amount: 7, description: '挥刀劈砍，造成 7 点伤害' },
-      { id: 'crush', kind: 'attack', amount: 11, description: '沉重的下劈，造成 11 点伤害' },
+      { id: 'slash', kind: 'attack', amount: 6, description: '挥刀劈砍，造成 6 点伤害' },
+      { id: 'crush', kind: 'attack', amount: 10, description: '沉重的下劈，造成 10 点伤害' },
       { id: 'brace', kind: 'defend', amount: 5, description: '举盾自守，获得 5 点格挡' },
     ],
   },
@@ -219,10 +226,10 @@ const ROSTER: readonly CombatantTemplate[] = [
     id: 'red-archer',
     role: '弓手',
     factionId: 'red-ring',
-    hp: 22,
+    hp: 12,
     actions: [
-      { id: 'loose', kind: 'attack', amount: 5, description: '放箭，造成 5 点伤害' },
-      { id: 'volley', kind: 'attack', amount: 8, description: '压制射击，造成 8 点伤害' },
+      { id: 'loose', kind: 'attack', amount: 4, description: '放箭，造成 4 点伤害' },
+      { id: 'volley', kind: 'attack', amount: 6, description: '压制射击，造成 6 点伤害' },
       { id: 'retreat', kind: 'defend', amount: 4, description: '后撤半步，获得 4 点格挡' },
     ],
   },
@@ -230,11 +237,22 @@ const ROSTER: readonly CombatantTemplate[] = [
     id: 'vine-scout',
     role: '斥候',
     factionId: 'green-vine',
-    hp: 26,
+    hp: 12,
     actions: [
-      { id: 'lash', kind: 'attack', amount: 6, description: '藤鞭抽击，造成 6 点伤害' },
-      { id: 'snare', kind: 'attack', amount: 9, description: '缠住对手狠抽，造成 9 点伤害' },
+      { id: 'lash', kind: 'attack', amount: 4, description: '藤鞭抽击，造成 4 点伤害' },
+      { id: 'snare', kind: 'attack', amount: 6, description: '缠住对手狠抽，造成 6 点伤害' },
       { id: 'coil', kind: 'defend', amount: 6, description: '蜷起藤甲，获得 6 点格挡' },
+    ],
+  },
+  {
+    id: 'vine-weaver',
+    role: '织者',
+    factionId: 'green-vine',
+    hp: 15,
+    actions: [
+      { id: 'weave', kind: 'attack', amount: 6, description: '藤蔓收束，造成 6 点伤害' },
+      { id: 'entangle', kind: 'attack', amount: 10, description: '连根绞紧，造成 10 点伤害' },
+      { id: 'root', kind: 'defend', amount: 5, description: '扎下根须，获得 5 点格挡' },
     ],
   },
 ];
