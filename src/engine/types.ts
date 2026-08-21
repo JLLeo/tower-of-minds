@@ -115,7 +115,7 @@ export interface AgentState {
  * Fusion（#13）与层间构筑（#14）各自加一个 kind——suspend / validate / fallback
  * 这条路只写一份（ADR-0010）。
  */
-export type AgentRequestKind = 'intent' | 'fusion' | 'deckbuild';
+export type AgentRequestKind = 'intent' | 'fusion' | 'deckbuild' | 'generation';
 
 export interface AgentRequestBase {
   /** 唯一标识这一次提问。响应靠它认领，迟到的响应因此认得出来。 */
@@ -160,7 +160,24 @@ export interface DeckbuildRequest extends AgentRequestBase {
   readonly forFloor: number;
 }
 
-export type AgentRequest = IntentRequest | FusionRequest | DeckbuildRequest;
+/**
+ * 开局的局势生成。它不属于任何一个 Faction——问的是「这一局的塔是什么样」，
+ * 所以 factionId 留空。
+ *
+ * 它只产出**局势**：名字、结仇原因、各自的诉求。Faction 的 id 是固定的，因为
+ * Base Card 按 id 分组——名册的机械身份是内容，不是虚构（ADR-0005）。
+ */
+export interface GenerationRequest extends AgentRequestBase {
+  readonly kind: 'generation';
+  /** 这一局要给哪些 Faction 编故事。id 固定，只有说法可变。 */
+  readonly factionIds: readonly string[];
+}
+
+export type AgentRequest =
+  | IntentRequest
+  | FusionRequest
+  | DeckbuildRequest
+  | GenerationRequest;
 
 /**
  * Player 目前单独建模，因为只有他持有 Deck。#6 的多方混战会让 Player 也变成
@@ -288,7 +305,7 @@ export interface FavorOffer {
   readonly choices: readonly string[];
 }
 
-export type RunPhase = 'in_encounter' | 'choosing_favor' | 'fusing' | 'ended';
+export type RunPhase = 'generating' | 'in_encounter' | 'choosing_favor' | 'fusing' | 'ended';
 export type RunOutcome = 'victory' | 'defeat';
 
 export interface RunState {
@@ -296,6 +313,8 @@ export interface RunState {
   readonly rng: Rng;
   /** 本局的 Agent，一个 Faction 一个，贯穿整座 Tower。 */
   readonly agents: readonly AgentState[];
+  /** 这一局的局势。开局生成，整座 Tower 通用（ADR-0007）。 */
+  readonly generation: Generation;
   /**
    * 引擎正在等待回答的提问。放在 Run 级而不是 Encounter 级，因为 Fusion 的提问
    * 发生在层间——那时并没有 Encounter 在进行。
@@ -385,6 +404,8 @@ export type PlayerInput =
  */
 export interface Generation {
   readonly title: string;
+  /** 这一局两派为什么互相看不顺眼。它是多方混战能不能活起来的开关。 */
+  readonly grievance: string;
 }
 
 /**
@@ -395,4 +416,6 @@ export interface RunOptions {
   readonly startingDeck?: readonly string[];
   /** Run 开始的时刻，用于第一次 IntentRequest 的超时计算。 */
   readonly startedAtMs?: number;
+  /** 跳过开局的局势生成，直接用传进来的那份进第 1 层。测试与离线场景用。 */
+  readonly skipGeneration?: boolean;
 }

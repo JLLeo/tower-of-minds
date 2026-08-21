@@ -1,8 +1,10 @@
 import { atomOf } from './atoms.js';
 import {
+  BUILT_IN_GENERATION,
   CARD_POOL,
   DECKBUILD_TIMEOUT_MS,
   FUSION_TIMEOUT_MS,
+  GENERATION_TIMEOUT_MS,
   INTENT_TIMEOUT_MS,
 } from './content.js';
 import { DECK_CAPACITY, legalCardsFor, presetDeckFor } from './deckbuild.js';
@@ -23,6 +25,8 @@ import type {
   CombatantState,
   DeckbuildRequest,
   FusionRequest,
+  Generation,
+  GenerationRequest,
   Intent,
   RunState,
 } from './types.js';
@@ -128,7 +132,93 @@ function settle(
       return settleFusion(withoutRequest, request, payload, timedOut);
     case 'deckbuild':
       return settleDeckbuild(withoutRequest, request, payload, timedOut);
+    case 'generation':
+      return settleGeneration(withoutRequest, request, payload, timedOut);
   }
+}
+
+// ---------------------------------------------------------------- generation
+
+/** 开局问一次：这一局的塔是什么样。 */
+export function openGenerationRequest(state: RunState, atMs: number): RunState {
+  return {
+    ...state,
+    nextRequestSeq: state.nextRequestSeq + 1,
+    agentRequests: [
+      ...state.agentRequests,
+      {
+        kind: 'generation',
+        id: `r${state.nextRequestSeq}`,
+        factionId: '',
+        requestedAtMs: atMs,
+        timeoutMs: GENERATION_TIMEOUT_MS,
+        factionIds: state.agents.map((agent) => agent.factionId),
+      },
+    ],
+  };
+}
+
+/** 局势里的一句话：洗掉空白、截断，空的就沿用内置那份。 */
+function sanitizeLine(raw: unknown, fallback: string, limit: number): string {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim();
+  return trimmed.length === 0 ? fallback : trimmed.slice(0, limit);
+}
+
+/**
+ * 校验生成的局势（ADR-0005）。它只能改**说法**：塔叫什么、两派为什么结仇、
+ * 各自是什么脾气、想要什么。
+ *
+ * Faction 的 id 一个都不能新增或替换——Base Card 按 id 分组，名册的机械身份是内容，
+ * 不是虚构。模型提到的陌生 id 一律忽略，缺的那份沿用内置。
+ */
+function settleGeneration(
+  state: RunState,
+  request: GenerationRequest,
+  payload: unknown,
+  timedOut: boolean,
+): RunState {
+  const record =
+    !timedOut && typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>)
+      : {};
+
+  const generation: Generation = {
+    title: sanitizeLine(record['title'], BUILT_IN_GENERATION.title, 16),
+    grievance: sanitizeLine(record['grievance'], BUILT_IN_GENERATION.grievance, 160),
+  };
+
+  const proposed = Array.isArray(record['factions']) ? (record['factions'] as unknown[]) : [];
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const entry of proposed) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const row = entry as Record<string, unknown>;
+    const id = row['factionId'];
+    if (typeof id === 'string' && request.factionIds.includes(id)) byId.set(id, row);
+  }
+
+  const agents = state.agents.map((agent) => {
+    const row = byId.get(agent.factionId);
+    if (!row) return agent;
+    return {
+      factionId: agent.factionId,
+      name: sanitizeLine(row['name'], agent.name, 8),
+      persona: sanitizeLine(row['persona'], agent.persona, 80),
+      goal: sanitizeLine(row['goal'], agent.goal, 160),
+    };
+  });
+
+  const accepted = byId.size > 0;
+  return {
+    ...state,
+    agents,
+    generation,
+    journal: [
+      ...state.journal,
+      accepted ? `这一局的塔：${generation.title}。` : '塔还是老样子。',
+      generation.grievance,
+    ],
+  };
 }
 
 // ---------------------------------------------------------------- deckbuild

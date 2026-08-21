@@ -15,6 +15,7 @@ import {
   fallbackIntent,
   openDeckbuildRequests,
   openFusionRequest,
+  openGenerationRequest,
   openIntentRequests,
   receiveResponse,
 } from './agents.js';
@@ -61,6 +62,10 @@ import type {
  * 同一 seed 加同一串输入必然得到同一个 Run。所有随机走 state.rng，所有时间从
  * input 进来，模型的回答也是一种 input——引擎自己既不掷骰、不读时钟，也不联网。
  */
+/**
+ * 开一局。先问一次「这一局的塔是什么样」，答上来或超时之后才进第 1 层——
+ * 局势是整座 Tower 通用的（ADR-0007），所以它必须在第一层之前定下来。
+ */
 export function startRun(
   generation: Generation,
   seed: number,
@@ -74,6 +79,7 @@ export function startRun(
     seed,
     rng: createRng(seed),
     agents: builtInAgents(),
+    generation,
     agentRequests: [],
     nextRequestSeq: 0,
     nextCardSeq: deckIds.length,
@@ -83,13 +89,15 @@ export function startRun(
     factionDecks: {},
     memories: {},
     favor: null,
-    phase: 'in_encounter',
+    phase: 'generating',
     encounter: EMPTY_ENCOUNTER,
     outcome: null,
-    journal: [`进入${generation.title}。`],
+    journal: ['塔在成形。'],
   };
 
-  return beginEncounter(seeded, 1, PLAYER_MAX_HP, startedAtMs);
+  // 不生成、直接开打是测试与离线场景的需要：给 options.skipGeneration 用。
+  if (options.skipGeneration) return beginEncounter(seeded, 1, PLAYER_MAX_HP, startedAtMs);
+  return openGenerationRequest(seeded, startedAtMs);
 }
 
 /**
@@ -102,9 +110,22 @@ function mintCard(definitionId: string, seq: number): CardInstance {
 
 /** 这一层站着谁：普通层是当层的名册，塔顶按当时的 Standing 结算。 */
 function fieldFor(state: RunState, floor: number): readonly CombatantState[] {
-  if (!isBossFloor(floor)) return combatantsForFloor(floor, offendedFactions(state));
+  // 场上的人从这一局的名册里取名（ADR-0007）：塔改了名，塔里的人也跟着改。
+  const factionName = (factionId: string): string =>
+    state.agents.find((agent) => agent.factionId === factionId)?.name ?? factionId;
+
+  if (!isBossFloor(floor)) {
+    return combatantsForFloor(floor, offendedFactions(state), factionName);
+  }
   const top = topOfTower(state);
-  return bossFloorCombatants(top.bossFactionId, top.allies, top.siege, floor, top.others);
+  return bossFloorCombatants(
+    top.bossFactionId,
+    top.allies,
+    top.siege,
+    floor,
+    top.others,
+    factionName,
+  );
 }
 
 /** 还没有 Encounter 时的占位。startRun 立刻会用真正的第一层覆盖它。 */
@@ -157,7 +178,10 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
       floor,
       favor: null,
       phase: 'in_encounter',
-      journal: [...state.journal, `第 ${floor} 层。`],
+      journal: [
+        ...state.journal,
+        floor === 1 ? `进入${state.generation.title}，第 1 层。` : `第 ${floor} 层。`,
+      ],
       // 层间备好的牌在这里兑现：它学会的东西变成多出来的动作。没答上来就什么都不带。
       factionDecks: {},
       encounter: {
@@ -184,6 +208,10 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
 
 export function applyInput(state: RunState, input: PlayerInput): RunState {
   if (state.phase === 'ended') return state;
+  // 塔还在成形：只有模型的回答与时间流逝算数。
+  if (state.phase === 'generating' && input.type !== 'agent_response' && input.type !== 'tick') {
+    return state;
+  }
   // 层间：玩家只能选 Favor 或发起融合。但对手的层间构筑是**并行**发生的，
   // 所以模型的回答与时间流逝照常放行——谁都不该被对方的界面挡住。
   if (
@@ -213,8 +241,11 @@ export function applyInput(state: RunState, input: PlayerInput): RunState {
     case 'fuse':
       return startFusion(state, input.offeredCardId, input.deckInstanceId, input.overload, input.atMs);
     case 'tick':
-      return expireRequests(
-        openDeckbuildIfNeeded(expireIfWindowClosed(state, input.atMs), input.atMs),
+      return enterTowerIfReady(
+        expireRequests(
+          openDeckbuildIfNeeded(expireIfWindowClosed(state, input.atMs), input.atMs),
+          input.atMs,
+        ),
         input.atMs,
       );
   }
@@ -944,6 +975,17 @@ function clearFloor(state: RunState): RunState {
       agentName ? `${agentName}记下了你这一场的选择。` : '没有哪一方觉得欠你人情。',
     ],
   };
+}
+
+/**
+ * 局势定下来了（答上来或超时），就进第 1 层。
+ *
+ * 和层间构筑一样挂在 tick 上：开一层需要一个真实时刻，而时刻只能从 input 进引擎。
+ */
+function enterTowerIfReady(state: RunState, atMs: number): RunState {
+  if (state.phase !== 'generating') return state;
+  if (state.agentRequests.some((request) => request.kind === 'generation')) return state;
+  return beginEncounter(state, 1, PLAYER_MAX_HP, atMs);
 }
 
 /**

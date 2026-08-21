@@ -48,8 +48,14 @@ export function render(
   stopTimingBar?.();
   stopTimingBar = null;
 
+  if (state.phase === 'generating') {
+    root.replaceChildren(generatingView(state));
+    return;
+  }
+
   root.replaceChildren(
     header(state),
+    situationView(state),
     combatantsView(state, view),
     playerView(state),
     handView(state, view, dispatch),
@@ -69,6 +75,32 @@ export function render(
       stopTimingBar = runTimingBar({ root, track, indicator }, pending, dispatch);
     }
   }
+}
+
+/** 塔还在成形。这一局的局势要先定下来，它整座塔通用。 */
+function generatingView(state: RunState): HTMLElement {
+  const section = el('section', 'favor');
+  section.appendChild(el('h2', undefined, '塔在成形…'));
+  section.appendChild(el('p', 'favor-hint', '这一局有哪几方、它们为什么结仇，正在定下来。'));
+  for (const agent of state.agents) {
+    section.appendChild(el('p', 'favor-hint', `${agent.name}：${agent.persona}`));
+  }
+  section.appendChild(el('p', 'favor-hint', state.journal.slice(-1)[0] ?? ''));
+  return section;
+}
+
+/** 这一局的局势。常驻显示——玩家随时该知道自己卷进了谁和谁的事。 */
+function situationView(state: RunState): HTMLElement {
+  const section = el('section', 'situation');
+  const details = el('details', 'situation-detail') as HTMLDetailsElement;
+  const summary = el('summary', undefined, state.generation.grievance);
+  details.appendChild(summary);
+  // 名册：谁跟谁结了仇，各自想要什么。打开一次就够了，所以收在 summary 后面。
+  for (const agent of state.agents) {
+    details.appendChild(el('p', undefined, `${agent.name}：${agent.goal}`));
+  }
+  section.appendChild(details);
+  return section;
 }
 
 function el(tag: string, className?: string, text?: string): HTMLElement {

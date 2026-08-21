@@ -39,11 +39,41 @@ const provider = createDeepSeekProvider({ baseUrl, model, apiKey });
 
 console.log(`供应商 ${baseUrl} · 模型 ${model} · ${rounds} 次调用\n`);
 
+// 开局的局势：这一局的塔叫什么、两派为什么结仇。它决定整局的味道，值得先看一眼。
+console.log('— 开局局势 —');
+{
+  const seeded = startRun(BUILT_IN_GENERATION, 7, { startedAtMs: 0 });
+  const request = seeded.agentRequests.find((r) => r.kind === 'generation');
+  const task = request ? taskFor(seeded, request) : undefined;
+  if (request && task) {
+    const startedAt = performance.now();
+    try {
+      const payload = await provider.ask(task, new AbortController().signal);
+      const settled = applyInput(seeded, {
+        type: 'agent_response',
+        requestId: request.id,
+        payload,
+      });
+      const changed = settled.generation.title !== BUILT_IN_GENERATION.title;
+      console.log(
+        `  ${Math.round(performance.now() - startedAt)}ms  ${changed ? '接受' : '拒绝并回退'}  ` +
+          `「${settled.generation.title}」`,
+      );
+      console.log(`  过节：${settled.generation.grievance}`);
+      for (const agent of settled.agents) {
+        console.log(`  ${agent.factionId} → ${agent.name}：${agent.persona}｜${agent.goal}`);
+      }
+    } catch (error) {
+      console.log(`  调用失败 :: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+}
+
 const timings: number[] = [];
 let rejected = 0;
 
 for (let i = 1; i <= rounds; i++) {
-  const state = startRun(BUILT_IN_GENERATION, i, { startedAtMs: 0 });
+  const state = startRun(BUILT_IN_GENERATION, i, { startedAtMs: 0, skipGeneration: true });
   console.log(`— 第 ${i} 局 —`);
 
   // 场上每个 Combatant 一条提问，并行发出（ADR-0004：不合并）。
@@ -90,7 +120,7 @@ for (let i = 1; i <= rounds; i++) {
 // 融合的取舍与命名：这功能的门面，值得看模型实际给什么。
 console.log('\n' + '— 融合取舍 —');
 for (const factionId of ['red-ring', 'green-vine']) {
-  const base = startRun(BUILT_IN_GENERATION, 1, { startedAtMs: 0 });
+  const base = startRun(BUILT_IN_GENERATION, 1, { startedAtMs: 0, skipGeneration: true });
   const atoms = ['strike', 'pierce', 'guard', 'draw', 'burn'];
   const request = {
     kind: 'fusion' as const,
@@ -124,7 +154,7 @@ for (const factionId of ['red-ring', 'green-vine']) {
 // 层间构筑：它会不会挑走你在它面前打过的牌？这是「对手也在构筑」唯一重要的问题。
 console.log(NEWLINE + '— 层间构筑 —');
 for (const factionId of ['red-ring', 'green-vine']) {
-  const base = startRun(BUILT_IN_GENERATION, 2, { startedAtMs: 0 });
+  const base = startRun(BUILT_IN_GENERATION, 2, { startedAtMs: 0, skipGeneration: true });
   // 假装玩家在它面前打过赤环的重击与青蔓的荆棘
   const seen: RunState = {
     ...base,

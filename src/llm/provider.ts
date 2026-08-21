@@ -23,7 +23,14 @@ export interface AtomOption {
   readonly weight: number;
 }
 
-export type AgentTask = IntentTask | FusionTask | DeckbuildTask;
+export type AgentTask = IntentTask | FusionTask | DeckbuildTask | GenerationTask;
+
+/** 开局的局势：这一局的塔叫什么、两派为什么结仇、各自想要什么。 */
+export interface GenerationTask {
+  readonly kind: 'generation';
+  /** 要编故事的那几方。id 固定，只有说法可变。 */
+  readonly factions: readonly { readonly id: string; readonly cards: string }[];
+}
 
 /** 层间构筑：从合法牌集里挑几张带上下一层，也可以顺手把其中两张融了。 */
 export interface DeckbuildTask {
@@ -81,6 +88,18 @@ export interface AgentProvider {
 
 /** 把一次 AgentRequest 翻译成模型看得懂的上下文。认不出来的请求返回 undefined。 */
 export function taskFor(state: RunState, request: AgentRequest): AgentTask | undefined {
+  if (request.kind === 'generation') {
+    return {
+      kind: 'generation',
+      factions: request.factionIds.map((id) => ({
+        id,
+        cards: CARD_POOL.filter((card) => card.faction === id)
+          .map((card) => card.name)
+          .join('、'),
+      })),
+    };
+  }
+
   const agent = state.agents.find((a) => a.factionId === request.factionId);
   if (!agent) return undefined;
 
