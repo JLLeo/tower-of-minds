@@ -12,7 +12,7 @@
  *   npm run smoke -- [次数]
  */
 import { applyInput, startRun } from '../src/engine/run.js';
-import { BUILT_IN_GENERATION } from '../src/engine/content.js';
+import { BUILT_IN_GENERATION, STARTING_DECK } from '../src/engine/content.js';
 import { createDeepSeekProvider } from '../src/llm/deepseek.js';
 import { taskFor } from '../src/llm/provider.js';
 import { legalCardsFor } from '../src/engine/deckbuild.js';
@@ -73,7 +73,7 @@ const timings: number[] = [];
 let rejected = 0;
 
 for (let i = 1; i <= rounds; i++) {
-  const state = startRun(BUILT_IN_GENERATION, i, { startedAtMs: 0, skipGeneration: true });
+  const state = startRun(BUILT_IN_GENERATION, i, { startedAtMs: 0, skipGeneration: true, startingDeck: STARTING_DECK });
   console.log(`— 第 ${i} 局 —`);
 
   // 场上每个 Combatant 一条提问，并行发出（ADR-0004：不合并）。
@@ -120,7 +120,7 @@ for (let i = 1; i <= rounds; i++) {
 // 融合的取舍与命名：这功能的门面，值得看模型实际给什么。
 console.log('\n' + '— 融合取舍 —');
 for (const factionId of ['red-ring', 'green-vine']) {
-  const base = startRun(BUILT_IN_GENERATION, 1, { startedAtMs: 0, skipGeneration: true });
+  const base = startRun(BUILT_IN_GENERATION, 1, { startedAtMs: 0, skipGeneration: true, startingDeck: STARTING_DECK });
   const atoms = ['strike', 'pierce', 'guard', 'draw', 'burn'];
   const request = {
     kind: 'fusion' as const,
@@ -154,7 +154,7 @@ for (const factionId of ['red-ring', 'green-vine']) {
 // 层间构筑：它会不会挑走你在它面前打过的牌？这是「对手也在构筑」唯一重要的问题。
 console.log(NEWLINE + '— 层间构筑 —');
 for (const factionId of ['red-ring', 'green-vine']) {
-  const base = startRun(BUILT_IN_GENERATION, 2, { startedAtMs: 0, skipGeneration: true });
+  const base = startRun(BUILT_IN_GENERATION, 2, { startedAtMs: 0, skipGeneration: true, startingDeck: STARTING_DECK });
   // 假装玩家在它面前打过赤环的重击与青蔓的荆棘
   const seen: RunState = {
     ...base,
