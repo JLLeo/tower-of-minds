@@ -59,6 +59,8 @@ Tower 顶层等待玩家的对手：Standing 最低的那个 Faction 的首领�
 
 **Forbidden Atom**:
 只有 Mutation 能拿到的 Atom。权重为负，因此突变产物更强也更便宜，代价写在效果里。
+
+它们和判定轴 Atom 一样**不产生 Effect**，改的是这张牌怎么结算：`sacrifice`（献）付 5 点生命换本卡其余 Atom 效果翻倍，`wild`（狂）目标随机，`contagion`（疫）把指向目标的效果落到场上每一个人身上（包括你偏袒的那一方），`greed`（贪）本局中每打出一次费用 +1。
 _Avoid_: 诅咒, 负面原子
 
 **Card**:

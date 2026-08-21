@@ -75,11 +75,14 @@ export const ATOMS: readonly AtomDefinition[] = [
   // 派系轴 —— 效果随 Standing 在 #8 落地。
   { id: 'parley', name: '交', axis: 'faction', weight: 3, template: { kind: 'parley' } },
 
-  // 禁忌 Atom —— 只有 Mutation 能拿到（#13）。权重为负，因此更强也更便宜。
-  { id: 'sacrifice', name: '献', axis: 'damage', weight: -2, flavor: '失去 5 点生命，本卡其余 Atom 效果翻倍', forbidden: true, pendingTicket: '#13' },
-  { id: 'wild', name: '狂', axis: 'damage', weight: -2, flavor: '目标随机', forbidden: true, pendingTicket: '#13' },
-  { id: 'contagion', name: '疫', axis: 'status', weight: -1, flavor: '效果同时作用于场上所有单位，包括你偏袒的一方', forbidden: true, pendingTicket: '#13' },
-  { id: 'greed', name: '贪', axis: 'resource', weight: -2, flavor: '本局中每打出一次，费用 +1', forbidden: true, pendingTicket: '#13' },
+  // 禁忌 Atom —— 只有 Mutation 能拿到。权重为负，因此更强也更便宜。
+  //
+  // 它们和判定轴一样没有 template：改的是这张牌**怎么结算**（打谁、打几个、翻不翻倍、
+  // 越打越贵），不是往效果表里加一条。所以 effectsOf 跳过它们，由 playCard 处理。
+  { id: 'sacrifice', name: '献', axis: 'damage', weight: -2, flavor: '失去 5 点生命，本卡其余 Atom 效果翻倍', forbidden: true },
+  { id: 'wild', name: '狂', axis: 'damage', weight: -2, flavor: '目标随机', forbidden: true },
+  { id: 'contagion', name: '疫', axis: 'status', weight: -1, flavor: '效果同时作用于场上所有单位，包括你偏袒的一方', forbidden: true },
+  { id: 'greed', name: '贪', axis: 'resource', weight: -2, flavor: '本局中每打出一次，费用 +1', forbidden: true },
 ];
 
 /** 单张 Card 至多容纳这么多 Atom。超过时 Fusion 必须丢弃，或过载触发 Mutation。 */

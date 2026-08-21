@@ -106,6 +106,7 @@ export function startRun(
     journal: ['塔在成形。'],
     ledger,
     earnedUnlocks: [],
+    playedCounts: {},
   };
 
   // 不问局势是测试与离线场景的需要：给 options.skipGeneration 用。它只管生成——
@@ -413,7 +414,7 @@ export function canPlay(state: RunState, instanceId: string): boolean {
   if (!isPlayerActing(state)) return false;
   if (!state.encounter.player.hand.some((c) => c.instanceId === instanceId)) return false;
   const definition = definitionOf(state, instanceId);
-  return definition !== undefined && definition.cost <= state.encounter.player.energy;
+  return definition !== undefined && costFor(state, definition) <= state.encounter.player.energy;
 }
 
 export function livingCombatants(state: RunState): readonly CombatantState[] {
@@ -509,6 +510,66 @@ export function intendedAction(combatant: CombatantState): CombatantAction | und
 
 // ---------------------------------------------------------------- 打牌
 
+/**
+ * 献（sacrifice）要付的血。它是这个系统里唯一一次「赌一把」的成本之一。
+ */
+const SACRIFICE_HP = 5;
+
+/**
+ * 这张牌现在要花多少能量。
+ *
+ * 贪（greed）让费用随本局打出次数递增，所以费用不再是牌面上那个死数——
+ * `canPlay`、扣能量与界面必须一律走这里，否则三处会各说各话。
+ */
+export function costFor(state: RunState, definition: CardDefinition): number {
+  if (!definition.atoms.includes('greed')) return definition.cost;
+  return definition.cost + (state.playedCounts[definition.id] ?? 0);
+}
+
+/**
+ * 禁忌 Atom 改写这张牌**怎么结算**：打谁（狂）、打几个（疫）、翻不翻倍（献）。
+ *
+ * 它们不进 effectsOf——那张表管的是「产生什么效果」，而这三个管的是效果落在谁身上、
+ * 落几份、放大多少。分开之后，一张牌带上禁忌 Atom 不会让效果表长出新条目。
+ */
+function shapeEffects(
+  state: RunState,
+  atoms: readonly string[],
+  target: string | undefined,
+): { effects: readonly Effect[]; rng: Rng; selfDamage: number } {
+  let rng = state.rng;
+  let aim = target;
+
+  // 狂：目标随机。随机走 state.rng，同一 seed 加同一串输入仍然得到同一个 Run。
+  if (atoms.includes('wild')) {
+    const alive = livingCombatants(state);
+    if (alive.length > 0) {
+      const [nextRng, index] = nextInt(rng, alive.length);
+      rng = nextRng;
+      aim = alive[index]?.id ?? aim;
+    }
+  }
+
+  let effects = effectsOf(atoms, aim);
+
+  // 疫：**指向目标的**那些效果落在场上每一个人身上，包括你偏袒的那一方。
+  // 给自己的那些（格挡、抽牌、能量）只结算一次——否则一张护体牌会按人数翻倍。
+  if (atoms.includes('contagion')) {
+    const alive = livingCombatants(state);
+    effects = effects.flatMap((effect): readonly Effect[] =>
+      'targetId' in effect
+        ? alive.map((c): Effect => ({ ...effect, targetId: c.id }))
+        : [effect],
+    );
+  }
+
+  // 献：自伤换翻倍。翻倍只作用于本卡其余 Atom——它自己不产生效果。
+  const selfDamage = atoms.includes('sacrifice') ? SACRIFICE_HP : 0;
+  if (selfDamage > 0) effects = scaleEffects(effects, 2);
+
+  return { effects, rng, selfDamage };
+}
+
 function playCard(state: RunState, instanceId: string, atMs: number, targetId?: string): RunState {
   if (!canPlay(state, instanceId)) return state;
 
@@ -517,29 +578,43 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
   const definition = definitionOf(state, instanceId);
   if (!card || !definition) return state;
 
+  const target = targetId ?? livingCombatants(state)[0]?.id;
+  const { effects, rng, selfDamage } = shapeEffects(state, definition.atoms, target);
+
   // 这张牌先离开手牌，但**不立刻进弃牌堆**——结算完才进去。否则「回收」这类
   // 效果会把正在结算的这张牌自己捡回来。
   const player: PlayerState = {
     ...encounter.player,
-    energy: encounter.player.energy - definition.cost,
+    energy: encounter.player.energy - costFor(state, definition),
+    hp: Math.max(0, encounter.player.hp - selfDamage),
     hand: encounter.player.hand.filter((c) => c.instanceId !== instanceId),
   };
 
-  const target = targetId ?? livingCombatants(state)[0]?.id;
-  const effects = effectsOf(definition.atoms, target);
   const journal = [...state.journal, `你打出「${definition.name}」。`];
+  if (selfDamage > 0) journal.push(`你割开自己，失去 ${selfDamage} 点生命。`);
 
   // 在场的人当场就看见了这张牌。必须记在挂起判定**之前**——否则盾牌类
   // 永远走不到记录那一步，而那正是 #14 要用的情报。
   const seen = rememberCardPlayed(
-    { ...state, journal, encounter: { ...encounter, player } },
+    {
+      ...state,
+      rng,
+      journal,
+      // 贪：下一次打这张牌就更贵了
+      playedCounts: {
+        ...state.playedCounts,
+        [definition.id]: (state.playedCounts[definition.id] ?? 0) + 1,
+      },
+      encounter: { ...encounter, player },
+    },
     definition.id,
   );
 
   // ADR-0002：需要实时输入的 Card 在这里把结算挂起，剩下的效果等输入回来再执行。
   // 每回合只挂起一次——同回合的后续 Card 直接结算。
   if (definition.execution && !encounter.executionUsedThisTurn) {
-    return {
+    // 献的自伤在打出的那一刻就付了，可能当场把人放倒——挂起之前就得认这个结果
+    return checkOutcome({
       ...seen,
       encounter: {
         ...seen.encounter,
@@ -554,7 +629,7 @@ function playCard(state: RunState, instanceId: string, atMs: number, targetId?: 
           presses: [],
         },
       },
-    };
+    });
   }
 
   return checkOutcome(discard(applyEffects(seen, effects), card));

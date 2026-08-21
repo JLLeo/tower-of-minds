@@ -2,6 +2,7 @@ import {
   GRADE_LABEL,
   canPlay,
   cardById,
+  costFor,
   currentSiding,
   standings,
   defaultTarget,
@@ -283,7 +284,7 @@ function favorView(state: RunState, view: View, dispatch: Dispatch): HTMLElement
   for (const cardId of offer.choices) {
     const definition = cardById(state, cardId);
     if (!definition) continue;
-    const button = cardButton(definition, view.fuseOfferedId === cardId);
+    const button = cardButton(definition, view.fuseOfferedId === cardId, costFor(state, definition));
     button.addEventListener('click', () => {
       if (fusing) view.onPickFuse(cardId, view.fuseDeckInstanceId);
       else dispatch({ type: 'choose_favor', cardId, atMs: performance.now() });
@@ -410,7 +411,7 @@ function handView(state: RunState, view: View, dispatch: Dispatch): HTMLElement 
     const button = document.createElement('button');
     button.className = `card card-${definition.type}`;
     button.disabled = !canPlay(state, card.instanceId);
-    button.appendChild(el('span', 'card-cost', String(definition.cost)));
+    button.appendChild(el('span', 'card-cost', String(costFor(state, definition))));
     button.appendChild(el('span', 'card-name', definition.name));
     button.appendChild(el('span', 'card-atoms', atomGlyphs(definition.atoms)));
     button.appendChild(el('span', 'card-text', describe(definition)));
@@ -600,10 +601,14 @@ function opponentPrep(state: RunState): HTMLElement {
   return wrap;
 }
 
-function cardButton(definition: CardDefinition, selected: boolean): HTMLButtonElement {
+function cardButton(
+  definition: CardDefinition,
+  selected: boolean,
+  cost = definition.cost,
+): HTMLButtonElement {
   const button = document.createElement('button');
   button.className = `card card-${definition.type}${selected ? ' card-selected' : ''}`;
-  button.appendChild(el('span', 'card-cost', String(definition.cost)));
+  button.appendChild(el('span', 'card-cost', String(cost)));
   button.appendChild(el('span', 'card-name', definition.name));
   button.appendChild(el('span', 'card-atoms', atomGlyphs(definition.atoms)));
   button.appendChild(el('span', 'card-text', describeAtoms(definition.atoms)));
@@ -619,7 +624,7 @@ function fusePicker(state: RunState, view: View, dispatch: Dispatch): HTMLElemen
   for (const card of state.deck) {
     const definition = cardById(state, card.definitionId);
     if (!definition) continue;
-    const button = cardButton(definition, view.fuseDeckInstanceId === card.instanceId);
+    const button = cardButton(definition, view.fuseDeckInstanceId === card.instanceId, costFor(state, definition));
     button.addEventListener('click', () => view.onPickFuse(view.fuseOfferedId, card.instanceId));
     row.appendChild(button);
   }
