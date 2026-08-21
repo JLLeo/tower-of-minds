@@ -100,7 +100,8 @@ setInterval(() => {
   if (
     state.agentRequests.length > 0 ||
     state.encounter.pending ||
-    state.phase === 'choosing_favor'
+    state.phase === 'choosing_favor' ||
+    state.phase === 'generating'
   ) {
     dispatch({ type: 'tick', atMs: performance.now() });
   }

@@ -14,10 +14,18 @@ import {
 import { ATOMS, MAX_ATOMS_PER_CARD, costOf, effectsOf } from './atoms.js';
 import { BUILT_IN_GENERATION, CARD_POOL, NORMAL_FLOORS, STARTING_DECK } from './content.js';
 import { PLAYER_TARGET } from './types.js';
-import type { DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
+import type { AgentRequest, DeckbuildRequest, FusionRequest, IntentRequest } from './types.js';
 import type { CombatantState, PlayerInput, RunOptions, RunState } from './types.js';
 
 const SEED = 20260818;
+
+/**
+ * 测试默认跳过开局的局势生成，直接进第 1 层——专门测生成的那一节除外。
+ * 局势是叙事，绝大多数断言不关心它，但每条测试都去等它会把噪音铺满整个文件。
+ */
+function beginRun(seed: number, options: RunOptions = {}): RunState {
+  return startRun(BUILT_IN_GENERATION, seed, { skipGeneration: true, ...options });
+}
 
 const ALL_GUARDS: RunOptions = { startingDeck: Array.from({ length: 10 }, () => 'guard') };
 const ALL_STRIKES: RunOptions = { startingDeck: Array.from({ length: 10 }, () => 'strike') };
@@ -192,14 +200,14 @@ function onlyOneActs(state: RunState, except: string, payload: unknown): RunStat
 }
 
 function run(inputs: readonly PlayerInput[], options?: RunOptions): RunState {
-  let state = startRun(BUILT_IN_GENERATION, SEED, options);
+  let state = beginRun(SEED, options);
   for (const input of inputs) state = applyInput(state, input);
   return state;
 }
 
 describe('startRun', () => {
   it('把玩家放进第 1 层的 Encounter，手牌抽满', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED);
+    const state = beginRun(SEED);
 
     expect(state.floor).toBe(1);
     expect(state.phase).toBe('in_encounter');
@@ -215,13 +223,13 @@ describe('startRun', () => {
   });
 
   it('同一 seed 得到同一个起手局面', () => {
-    expect(startRun(BUILT_IN_GENERATION, SEED)).toEqual(startRun(BUILT_IN_GENERATION, SEED));
+    expect(beginRun(SEED)).toEqual(beginRun(SEED));
   });
 });
 
 describe('Card 循环', () => {
   it('打出一张牌会扣能量、离开手牌、进入弃牌堆', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED, ALL_STRIKES);
+    const state = beginRun(SEED, ALL_STRIKES);
     const card = state.encounter.player.hand[0];
     const definition = definitionOf(state, card!.instanceId);
     expect(definition).toBeDefined();
@@ -234,7 +242,7 @@ describe('Card 循环', () => {
   });
 
   it('能量不够时打牌不改变状态', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, ALL_STRIKES);
+    let state = beginRun(SEED, ALL_STRIKES);
     const at = clock();
     for (let i = 0; i < 3; i++) {
       const playable = state.encounter.player.hand.find((c) => canPlay(state, c.instanceId));
@@ -254,7 +262,7 @@ describe('Card 循环', () => {
   });
 
   it('结束回合会弃掉手牌并重新抽满', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED);
+    const state = beginRun(SEED);
     const next = applyInput(state, { type: 'end_turn', atMs: 10_000 });
 
     expect(next.encounter.turn).toBe(2);
@@ -264,7 +272,7 @@ describe('Card 循环', () => {
   });
 
   it('抽牌堆抽空后会把弃牌堆洗回来，牌的总数不变', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED);
+    let state = beginRun(SEED);
     for (let i = 0; i < 3 && state.phase === 'in_encounter'; i++) {
       state = applyInput(allDefend(state), { type: 'end_turn', atMs: 10_000 * (i + 1) });
     }
@@ -282,7 +290,7 @@ describe('Agent 与 Intent（ADR-0001）', () => {
   const GUARD = 'tower-guard';
 
   function fresh(): RunState {
-    return startRun(BUILT_IN_GENERATION, SEED, { ...ALL_STRIKES, startedAtMs: 0 });
+    return beginRun(SEED, { ...ALL_STRIKES, startedAtMs: 0 });
   }
 
   /** 只回答塔卫那一条提问，其余留着不动。 */
@@ -444,7 +452,7 @@ describe('完整一场', () => {
   it('用固定 seed 与一串脚本化输入推完五层，Deck 一层长一张', () => {
     // 断言的是「推进」而不是「取胜」：驱动这一串输入的是个很粗糙的策略，
     // 它该不该赢是平衡问题，不该由测试来决定。
-    const state = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
+    const state = run(scriptInputs(beginRun(SEED)));
 
     expect(state.phase).toBe('ended');
     expect(state.floor).toBe(5); // 一路推到了最后一层
@@ -466,19 +474,19 @@ describe('完整一场', () => {
   });
 
   it('同一 seed 加同一串输入必然得到同一个 Run', () => {
-    const inputs = scriptInputs(startRun(BUILT_IN_GENERATION, SEED));
+    const inputs = scriptInputs(beginRun(SEED));
     expect(run(inputs)).toEqual(run(inputs));
   });
 
   it('Run 结束后再喂输入不再改变状态', () => {
-    const state = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
+    const state = run(scriptInputs(beginRun(SEED)));
     expect(applyInput(state, { type: 'end_turn', atMs: 10_000 })).toEqual(state);
   });
 });
 
 describe('Execution Check：挂起与恢复（ADR-0002）', () => {
   function suspended(): RunState {
-    const state = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
+    const state = beginRun(SEED, ALL_GUARDS);
     const card = state.encounter.player.hand[0];
     return applyInput(state, { type: 'play_card', instanceId: card!.instanceId, atMs: 100 });
   }
@@ -548,7 +556,7 @@ describe('Execution Check：挂起与恢复（ADR-0002）', () => {
 
 describe('Execution Check：档位与倍率', () => {
   function blockAfter(inputs: (state: RunState) => readonly PlayerInput[]): RunState {
-    const start = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
+    const start = beginRun(SEED, ALL_GUARDS);
     const card = start.encounter.player.hand[0];
     const suspended = applyInput(start, {
       type: 'play_card',
@@ -603,7 +611,7 @@ describe('Execution Check：档位与倍率', () => {
   });
 
   it('窗口还没走完时 tick 不改变任何东西', () => {
-    const start = startRun(BUILT_IN_GENERATION, SEED, ALL_GUARDS);
+    const start = beginRun(SEED, ALL_GUARDS);
     const card = start.encounter.player.hand[0];
     const suspended = applyInput(start, {
       type: 'play_card',
@@ -622,19 +630,19 @@ describe('Execution Check：档位与倍率', () => {
   });
 
   it('既没有挂起结算、也没到 Intent 截止点时，tick 是空操作', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+    const state = beginRun(SEED, { startedAtMs: 0 });
     expect(applyInput(state, { type: 'tick', atMs: 100 })).toBe(state);
   });
 });
 
 describe('Atom 系统', () => {
   it('费用由 Atom 权重推出：打出后扣掉的能量就是算出来的那个数', () => {
-    const one = startRun(BUILT_IN_GENERATION, SEED, deckOf('strike'));
+    const one = beginRun(SEED, deckOf('strike'));
     expect(one.encounter.player.energy - playCardById(one, 'strike').encounter.player.energy).toBe(
       1,
     ); // strike(3) -> ceil(3/3)
 
-    const two = startRun(BUILT_IN_GENERATION, SEED, deckOf('heavy'));
+    const two = beginRun(SEED, deckOf('heavy'));
     expect(two.encounter.player.energy - playCardById(two, 'heavy').encounter.player.energy).toBe(
       2,
     ); // strike(3)+pierce(3) -> ceil(6/3)
@@ -642,11 +650,11 @@ describe('Atom 系统', () => {
 
   it('Card Type 由主导 Atom 推出：防御为主的牌才会触发格挡判定', () => {
     // 铁壁 = guard + endure，防御轴占多数 -> shield -> 挂起判定
-    const shield = startRun(BUILT_IN_GENERATION, SEED, deckOf('bulwark'));
+    const shield = beginRun(SEED, deckOf('bulwark'));
     expect(playCardById(shield, 'bulwark').encounter.phase).toBe('awaiting_execution');
 
     // 汲取 = draw，只有资源轴 -> spell -> 本票还没有它的判定原型
-    const spell = startRun(BUILT_IN_GENERATION, SEED, deckOf('siphon'));
+    const spell = beginRun(SEED, deckOf('siphon'));
     expect(playCardById(spell, 'siphon').encounter.phase).toBe('player_turn');
   });
 
@@ -716,7 +724,7 @@ describe('Atom 效果', () => {
   }
 
   it('pierce 无视格挡', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('rend'));
+    let state = beginRun(SEED, deckOf('rend'));
     state = answerWith(state, 'brace');
     state = applyInput(state, { type: 'end_turn', atMs: 1000 });
     expect(foeOf(state).block).toBe(5);
@@ -729,7 +737,7 @@ describe('Atom 效果', () => {
   });
 
   it('multi 的分段不会绕过格挡：格挡在各段之间共享', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('flurry'));
+    let state = beginRun(SEED, deckOf('flurry'));
 
     const bare = playCardById(state, 'flurry');
     expect(foeOf(bare).hp).toBe(foeOf(state).hp - 6); // 3 段各 2
@@ -748,7 +756,7 @@ describe('Atom 效果', () => {
       startingDeck: ['crack', 'flurry', 'strike', 'crack', 'flurry', 'strike', 'crack', 'flurry', 'strike', 'strike'],
       startedAtMs: 0,
     };
-    const opened = startRun(BUILT_IN_GENERATION, SEED, deck);
+    const opened = beginRun(SEED, deck);
     const before = foeOf(opened).hp;
 
     const exposed = playCardById(opened, 'crack');
@@ -759,7 +767,7 @@ describe('Atom 效果', () => {
   });
 
   it('burn 在回合末结算，并按回合数递减', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('ignite'));
+    let state = beginRun(SEED, deckOf('ignite'));
     const before = foeOf(state).hp;
 
     state = playCardById(state, 'ignite');
@@ -778,7 +786,7 @@ describe('Atom 效果', () => {
   });
 
   it('expose 让下一次伤害 +50%，且只生效一次', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, {
+    let state = beginRun(SEED, {
       startingDeck: ['crack', 'strike', 'strike', 'crack', 'strike', 'strike', 'strike', 'crack', 'strike', 'strike'],
       startedAtMs: 0,
     });
@@ -796,7 +804,7 @@ describe('Atom 效果', () => {
   });
 
   it('weaken 让对手下次攻击减半', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('sap'));
+    let state = beginRun(SEED, deckOf('sap'));
     state = answerWith(state, 'slash');
     const hpBefore = state.encounter.player.hp;
 
@@ -813,7 +821,7 @@ describe('Atom 效果', () => {
       startingDeck: ['bramble', 'crack', 'strike', 'bramble', 'crack', 'strike', 'strike', 'strike', 'strike', 'strike'],
       startedAtMs: 0,
     };
-    let state = startRun(BUILT_IN_GENERATION, SEED, deck);
+    let state = beginRun(SEED, deck);
     state = answerWith(state, 'slash');
 
     state = playAndResolve(state, 'bramble');
@@ -826,7 +834,7 @@ describe('Atom 效果', () => {
   });
 
   it('thorns 在对手攻击时反弹', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('bramble'));
+    let state = beginRun(SEED, deckOf('bramble'));
     state = answerWith(state, 'slash');
 
     state = playAndResolve(state, 'bramble');
@@ -838,7 +846,7 @@ describe('Atom 效果', () => {
   });
 
   it('endure 减免本回合伤害，回合结束后清零', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('brace'));
+    let state = beginRun(SEED, deckOf('brace'));
     state = answerWith(state, 'slash');
     const hpBefore = state.encounter.player.hp;
 
@@ -851,12 +859,12 @@ describe('Atom 效果', () => {
   });
 
   it('draw 抽牌、surge 给能量', () => {
-    let siphon = startRun(BUILT_IN_GENERATION, SEED, deckOf('siphon'));
+    let siphon = beginRun(SEED, deckOf('siphon'));
     const handBefore = siphon.encounter.player.hand.length;
     siphon = playCardById(siphon, 'siphon');
     expect(siphon.encounter.player.hand.length).toBe(handBefore); // 打掉一张、抽回一张
 
-    let surged = startRun(BUILT_IN_GENERATION, SEED, deckOf('surge'));
+    let surged = beginRun(SEED, deckOf('surge'));
     const energyBefore = surged.encounter.player.energy;
     surged = playCardById(surged, 'surge');
     expect(surged.encounter.player.energy).toBe(energyBefore); // -1 费 +1 能量
@@ -869,7 +877,7 @@ describe('Atom 效果', () => {
     };
 
     // 弃牌堆空着的时候打出回收：它不该把自己捡回来
-    const empty = startRun(BUILT_IN_GENERATION, SEED, deck);
+    const empty = beginRun(SEED, deck);
     const alone = playCardById(empty, 'glean');
     expect(alone.encounter.player.discardPile).toHaveLength(1);
     expect(alone.encounter.player.discardPile[0]?.instanceId).toContain('glean');
@@ -891,7 +899,7 @@ describe('Atom 效果', () => {
 
 describe('AgentRequest 管道（ADR-0010）', () => {
   it('Agent 是 Faction 级的，一个 Faction 一个', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+    const state = beginRun(SEED, { startedAtMs: 0 });
 
     expect(state.agents.length).toBeGreaterThan(1);
     const factions = new Set(state.agents.map((a) => a.factionId));
@@ -904,7 +912,7 @@ describe('AgentRequest 管道（ADR-0010）', () => {
   });
 
   it('每个提问都带 kind 与唯一 id，并指向发问对象所属的 Faction', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+    const state = beginRun(SEED, { startedAtMs: 0 });
     const request = state.agentRequests[0];
 
     expect(request?.kind).toBe('intent');
@@ -916,7 +924,7 @@ describe('AgentRequest 管道（ADR-0010）', () => {
   });
 
   it('提问不会跨回合堆积：没回答的问题在回合推进时作废', () => {
-    const state = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+    const state = beginRun(SEED, { startedAtMs: 0 });
     expect(state.agentRequests).toHaveLength(3); // 每个 Combatant 一条
     const firstIds = new Set(state.agentRequests.map((r) => r.id));
 
@@ -930,7 +938,7 @@ describe('AgentRequest 管道（ADR-0010）', () => {
   });
 
   it('Run 结束时不留下任何待回答的提问', () => {
-    const ended = run(scriptInputs(startRun(BUILT_IN_GENERATION, SEED)));
+    const ended = run(scriptInputs(beginRun(SEED)));
     expect(ended.phase).toBe('ended');
     expect(ended.agentRequests).toHaveLength(0);
   });
@@ -945,7 +953,7 @@ describe('多方混战与站队', () => {
 
 
   function fresh(options?: RunOptions): RunState {
-    return startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+    return beginRun(SEED, { startedAtMs: 0, ...options });
   }
 
   it('每个 Combatant 各有一条提问，即使同属一个 Faction', () => {
@@ -1134,7 +1142,7 @@ describe('多 Floor 推进与 Favor', () => {
   }
 
   it('清完一层不会直接结束 Run，而是停下来收人情', () => {
-    const state = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const state = clearFloorOne(beginRun(SEED, deckOf('strike')));
 
     expect(state.phase).toBe('choosing_favor');
     expect(state.outcome).toBeNull();
@@ -1147,7 +1155,7 @@ describe('多 Floor 推进与 Favor', () => {
   });
 
   it('收下 Favor 会进 Deck，并在下一层第一回合就可能摸到', () => {
-    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const cleared = clearFloorOne(beginRun(SEED, deckOf('strike')));
     const picked = cleared.favor!.choices[0]!;
     const deckBefore = cleared.deck.length;
 
@@ -1166,7 +1174,7 @@ describe('多 Floor 推进与 Favor', () => {
   });
 
   it('可以什么都不要', () => {
-    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const cleared = clearFloorOne(beginRun(SEED, deckOf('strike')));
     const next = applyInput(cleared, { type: 'choose_favor', cardId: null, atMs: 20_000 });
 
     expect(next.floor).toBe(2);
@@ -1174,14 +1182,14 @@ describe('多 Floor 推进与 Favor', () => {
   });
 
   it('不在选项里的牌拿不走', () => {
-    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const cleared = clearFloorOne(beginRun(SEED, deckOf('strike')));
     expect(
       applyInput(cleared, { type: 'choose_favor', cardId: 'skewer-not-offered', atMs: 20_000 }),
     ).toBe(cleared);
   });
 
   it('选 Favor 的时候玩家的别的输入都不生效，但对手照常在忙', () => {
-    const cleared = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const cleared = clearFloorOne(beginRun(SEED, deckOf('strike')));
 
     // 玩家这边：除了选 Favor 和发起融合，什么都不生效
     expect(applyInput(cleared, { type: 'end_turn', atMs: 20_000 })).toBe(cleared);
@@ -1202,7 +1210,7 @@ describe('多 Floor 推进与 Favor', () => {
   });
 
   it('同向站队两次就跨过阈值，Favor 升到高阶', () => {
-    let state = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    let state = clearFloorOne(beginRun(SEED, deckOf('strike')));
     expect(state.favor?.tier).toBe('basic');
     expect(standings(state)['red-ring']).toBe(1);
 
@@ -1214,7 +1222,7 @@ describe('多 Floor 推进与 Favor', () => {
   });
 
   it('保下的人越多，它给得越大方', () => {
-    const bothAlive = clearFloorOne(startRun(BUILT_IN_GENERATION, SEED, deckOf('strike')));
+    const bothAlive = clearFloorOne(beginRun(SEED, deckOf('strike')));
     // 赤环两人都活着
     expect(
       bothAlive.encounter.combatants.filter((c) => c.hp > 0 && c.factionId === 'red-ring'),
@@ -1224,7 +1232,7 @@ describe('多 Floor 推进与 Favor', () => {
 
   it('欠你人情的那一方会替你包扎', () => {
     // 先挨一刀，否则满血无从谈起恢复
-    let state = startRun(BUILT_IN_GENERATION, SEED, deckOf('strike'));
+    let state = beginRun(SEED, deckOf('strike'));
     state = onlyOneActs(state, 'tower-guard', {
       actionId: 'slash',
       targetId: PLAYER_TARGET,
@@ -1243,7 +1251,7 @@ describe('多 Floor 推进与 Favor', () => {
 
 describe('Memory 与 Standing', () => {
   function fresh(options?: RunOptions): RunState {
-    return startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+    return beginRun(SEED, { startedAtMs: 0, ...options });
   }
 
   /** 打光青蔓这一派，清掉当前这一层；赤环一直自守。 */
@@ -1411,7 +1419,7 @@ describe('Memory 与 Standing', () => {
 
 describe('Fusion 与 Mutation', () => {
   const fresh = (options?: RunOptions): RunState =>
-    startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+    beginRun(SEED, { startedAtMs: 0, ...options });
 
   /** 牌库里放满重击（两个 Atom），这样两张合起来正好顶到上限。 */
   const FUSION_DECK: RunOptions = {
@@ -1643,7 +1651,7 @@ describe('Fusion 与 Mutation', () => {
     // 一个把偏好顺序弄反了的 bug 才溜了过去。
     const atoms = ['strike', 'pierce', 'guard', 'draw', 'burn'];
     const forge = (factionId: string): readonly string[] => {
-      const base = startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0 });
+      const base = beginRun(SEED, { startedAtMs: 0 });
       const request: FusionRequest = {
         kind: 'fusion',
         id: 'r0',
@@ -1694,7 +1702,7 @@ describe('Fusion 与 Mutation', () => {
 
 describe('对手也在构筑', () => {
   const fresh = (options?: RunOptions): RunState =>
-    startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+    beginRun(SEED, { startedAtMs: 0, ...options });
 
   /** 打光青蔓这一派，清掉当前这一层；赤环一直自守。 */
   function clearFloor(state: RunState): RunState {
@@ -1903,7 +1911,7 @@ describe('对手也在构筑', () => {
 
 describe('Boss 层（ADR-0008）', () => {
   const fresh = (options?: RunOptions): RunState =>
-    startRun(BUILT_IN_GENERATION, SEED, { startedAtMs: 0, ...options });
+    beginRun(SEED, { startedAtMs: 0, ...options });
 
   /** 直接把 Run 摆到塔顶前一刻，Standing 由这份 memories 决定。 */
   function atTop(memories: RunState['memories']): RunState {
@@ -2110,7 +2118,7 @@ describe('Boss 层（ADR-0008）', () => {
 
 describe('一局完整的塔', () => {
   it('从 startRun 一路打到塔顶：五个普通 Floor 加一场首领战', () => {
-    let state = startRun(BUILT_IN_GENERATION, SEED, {
+    let state = beginRun(SEED, {
       startingDeck: Array.from({ length: 10 }, () => 'heavy'),
       startedAtMs: 0,
     });
@@ -2165,5 +2173,133 @@ describe('一局完整的塔', () => {
     // 跨局的东西一律清空（ADR-0003 / ADR-0009）
     expect(Object.keys(state.memories)).toHaveLength(0);
     expect(state.forged).toHaveLength(0);
+  });
+});
+
+describe('开局的局势', () => {
+  /** 真正走生成那条路：不跳过，从「塔在成形」开始。 */
+  function generating(seed = SEED): RunState {
+    return startRun(BUILT_IN_GENERATION, seed, { startedAtMs: 0 });
+  }
+
+  function generationRequestOf(state: RunState): AgentRequest {
+    const request = state.agentRequests.find((r) => r.kind === 'generation');
+    if (!request) throw new Error('没有待答的局势生成');
+    return request;
+  }
+
+  /** 脚本化的假 provider：把这份答案交给引擎，再报一次时让塔开门。 */
+  function answerGeneration(state: RunState, payload: unknown): RunState {
+    const answered = applyInput(state, {
+      type: 'agent_response',
+      requestId: generationRequestOf(state).id,
+      payload,
+    });
+    return applyInput(answered, { type: 'tick', atMs: 1 });
+  }
+
+  const GOOD = {
+    title: '断水的塔',
+    grievance: '铁沙截了井，藤影就烧了他们的粮道。',
+    factions: [
+      { factionId: 'green-vine', name: '藤影', persona: '记仇，不出声', goal: '把井抢回来' },
+      { factionId: 'red-ring', name: '铁沙', persona: '先动手再说', goal: '守住井口，逼藤影低头' },
+    ],
+  };
+
+  it('第 1 层要等局势定下来才开', () => {
+    const state = generating();
+
+    expect(state.phase).toBe('generating');
+    expect(state.floor).toBe(0);
+    expect(state.encounter.combatants).toHaveLength(0);
+    expect(state.agentRequests.filter((r) => r.kind === 'generation')).toHaveLength(1);
+  });
+
+  it('塔还在成形时，玩家的输入一律不算数', () => {
+    const state = generating();
+    const meddled = applyInput(state, { type: 'end_turn', atMs: 500 });
+
+    expect(meddled).toBe(state);
+  });
+
+  it('答上来了：这一局的塔和两派都换了说法，然后开门', () => {
+    const state = answerGeneration(generating(), GOOD);
+
+    expect(state.generation.title).toBe('断水的塔');
+    expect(state.generation.grievance).toBe(GOOD.grievance);
+    expect([...state.agents].map((a) => a.name).sort()).toEqual(['藤影', '铁沙'].sort());
+    expect(state.agents.find((a) => a.factionId === 'red-ring')?.goal).toContain('井');
+    expect(state.phase).toBe('in_encounter');
+    expect(state.floor).toBe(1);
+    expect(state.journal.some((line) => line.includes('断水的塔'))).toBe(true);
+  });
+
+  it('局势只换说法，不换名册：陌生的 Faction id 一律不认', () => {
+    const state = answerGeneration(generating(), {
+      ...GOOD,
+      factions: [
+        ...GOOD.factions,
+        { factionId: 'blue-ash', name: '灰烬', persona: '冷', goal: '看戏' },
+      ],
+    });
+
+    // Base Card 按 id 分组，凭空多出来的一派会把整副牌池打散
+    expect([...state.agents].map((a) => a.factionId).sort()).toEqual([
+      'green-vine',
+      'red-ring',
+    ]);
+    expect(state.encounter.combatants.every((c) => c.factionId !== 'blue-ash')).toBe(true);
+  });
+
+  it('模型答歪了也不影响开局：空字段沿用内置那份', () => {
+    const before = generating();
+    const state = answerGeneration(before, {
+      title: '   ',
+      factions: [{ factionId: 'green-vine', name: '', persona: 42, goal: null }],
+    });
+
+    expect(state.generation.title).toBe(BUILT_IN_GENERATION.title);
+    expect(state.generation.grievance).toBe(BUILT_IN_GENERATION.grievance);
+    const vine = state.agents.find((a) => a.factionId === 'green-vine')!;
+    const original = before.agents.find((a) => a.factionId === 'green-vine')!;
+    expect(vine.name).toBe(original.name);
+    expect(vine.persona).toBe(original.persona);
+    expect(state.phase).toBe('in_encounter');
+  });
+
+  it('回退：模型不答，超时之后照常进第 1 层', () => {
+    const state = generating();
+    const request = generationRequestOf(state);
+    const expired = applyInput(state, {
+      type: 'tick',
+      atMs: request.requestedAtMs + request.timeoutMs,
+    });
+
+    expect(expired.generation).toEqual(BUILT_IN_GENERATION);
+    expect(expired.agents).toEqual(generating().agents);
+    expect(expired.phase).toBe('in_encounter');
+    expect(expired.floor).toBe(1);
+    expect(expired.agentRequests.some((r) => r.kind === 'generation')).toBe(false);
+  });
+
+  it('名册管到每一层：塔改了名，塔里的人也跟着改', () => {
+    const state = answerGeneration(generating(), GOOD);
+
+    // 场上的人不该还叫着上一局的名字
+    for (const combatant of state.encounter.combatants) {
+      const faction = state.agents.find((a) => a.factionId === combatant.factionId)!;
+      expect(combatant.name.startsWith(faction.name)).toBe(true);
+    }
+    expect(state.encounter.combatants.some((c) => c.name.startsWith('藤影'))).toBe(true);
+    expect(state.encounter.combatants.some((c) => c.name.startsWith('铁沙'))).toBe(true);
+  });
+
+  it('同一个 seed 加同一份局势，开出来的第 1 层一模一样', () => {
+    const a = answerGeneration(generating(), GOOD);
+    const b = answerGeneration(generating(), GOOD);
+
+    expect(b.encounter.combatants).toEqual(a.encounter.combatants);
+    expect(b.encounter.player.hand).toEqual(a.encounter.player.hand);
   });
 });

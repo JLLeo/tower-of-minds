@@ -44,7 +44,7 @@ _Avoid_: Game, session, 一局
 _Avoid_: 战斗, battle, combat
 
 **Generation**:
-Run 开始时由 LLM 一次性产出该局的**局势**：有哪几个 Faction、它们因为什么结仇、各自想要什么。它不产出规则——Atom 表、Base Card、判定窗口在所有 Run 中固定不变。
+Run 开始时由 LLM 一次性产出该局的**局势**：这座塔叫什么、Faction 之间因为什么结仇、各自想要什么。名册的**机械身份**（Faction 的 id）是固定的——Base Card 按 id 分组，改 id 会把牌池打散；变的只是名字、脾气、诉求与那条过节。它不产出规则——Atom 表、Base Card、判定窗口在所有 Run 中固定不变。
 _Avoid_: 随机生成, procgen
 
 **Boss**:

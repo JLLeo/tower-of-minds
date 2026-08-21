@@ -379,3 +379,23 @@ button.danger {
   font-size: 12px;
   color: #d2797f;
 }
+
+/* 这一局的局势。常驻一行，提醒玩家自己卷进了谁和谁的事。 */
+.situation {
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
+}
+
+.situation summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.situation p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.5;
+}

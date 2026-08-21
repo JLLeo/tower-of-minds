@@ -33,6 +33,27 @@ ${CARD_POOL_LINES}`;
  * 全局规则与卡池留在 system 里，对所有 Agent、所有 kind 完全一致，用于命中缓存。
  */
 function userPrompt(task: AgentTask): string {
+  if (task.kind === 'generation') {
+    const rows = task.factions
+      .map((f) => `- ${f.id}：这一派用的牌是「${f.cards}」`)
+      .join(NEWLINE);
+    return `给这一局的塔编一个局势。
+
+塔里有下面这几方。**它们的 id 是固定的，你不能新增、删除或替换**，只能给它们起名字、
+定脾气、写清楚它们各自想要什么，以及**它们为什么互相看不顺眼**。
+每一派用的牌能透露它们是什么样的人。
+
+${rows}
+
+最要紧的是那条过节：它们之间必须有一个具体的、能让人动手的理由，而不是「都想赶走外来者」。
+外来者只是刚好撞进来的第三方。
+
+用 JSON 回答：
+{"title":"<塔的名字，不超过 8 个字>",
+ "grievance":"<两派为什么结仇，一到两句>",
+ "factions":[{"factionId":"<上面的 id>","name":"<不超过 4 个字>","persona":"<脾气，一句>","goal":"<它想要什么，一到两句，要提到它跟另一方的过节>"}]}`;
+  }
+
   const persona = `你是${task.agent.name}。你的性格：${task.agent.persona}
 你的目标：${task.agent.goal}
 
@@ -122,6 +143,14 @@ export interface DeepSeekOptions {
   readonly apiKey?: string;
 }
 
+/**
+ * 回答的长度上限。Intent 是一句台词，局势是两派的一整段设定——用同一个上限会把
+ * 局势截成半截 JSON，解析一失败就整局悄悄回退成内置那份，而且看上去像模型答错了。
+ */
+function maxTokensFor(task: AgentTask): number {
+  return task.kind === 'generation' ? 600 : 120;
+}
+
 export function createDeepSeekProvider(options: DeepSeekOptions): AgentProvider {
   return {
     async ask(task: AgentTask, signal: AbortSignal): Promise<unknown> {
@@ -142,7 +171,7 @@ export function createDeepSeekProvider(options: DeepSeekOptions): AgentProvider 
           // 实测只有 { type: 'disabled' } 真的关得掉。
           thinking: { type: 'disabled' },
           response_format: { type: 'json_object' },
-          max_tokens: 120,
+          max_tokens: maxTokensFor(task),
           stream: false,
         }),
       });

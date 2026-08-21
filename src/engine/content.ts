@@ -125,7 +125,11 @@ export const NORMAL_FLOORS = 5;
 
 interface CombatantTemplate {
   readonly id: string;
-  readonly name: string;
+  /**
+   * 这个人在自己那一派里干什么。名字里的派系那半截不写死——它由这一局生成的
+   * 名册来填，否则塔改了名，场上的人还叫着上一局的旧称。
+   */
+  readonly role: string;
   readonly factionId: string;
   readonly hp: number;
   readonly actions: readonly CombatantAction[];
@@ -134,7 +138,7 @@ interface CombatantTemplate {
 const ROSTER: readonly CombatantTemplate[] = [
   {
     id: 'tower-guard',
-    name: '塔卫',
+    role: '塔卫',
     factionId: 'red-ring',
     hp: 34,
     actions: [
@@ -145,7 +149,7 @@ const ROSTER: readonly CombatantTemplate[] = [
   },
   {
     id: 'red-archer',
-    name: '赤环弓手',
+    role: '弓手',
     factionId: 'red-ring',
     hp: 22,
     actions: [
@@ -156,7 +160,7 @@ const ROSTER: readonly CombatantTemplate[] = [
   },
   {
     id: 'vine-scout',
-    name: '青蔓斥候',
+    role: '斥候',
     factionId: 'green-vine',
     hp: 26,
     actions: [
@@ -173,7 +177,8 @@ const ROSTER: readonly CombatantTemplate[] = [
  */
 export function combatantsForFloor(
   floor: number,
-  reinforced: readonly string[] = [],
+  reinforced: readonly string[],
+  factionName: (factionId: string) => string,
 ): readonly CombatantState[] {
   const scale = 1 + 0.12 * (floor - 1);
   const build = (template: CombatantTemplate, suffix = ''): CombatantState => {
@@ -181,7 +186,7 @@ export function combatantsForFloor(
     const hp = Math.round(template.hp * scale * (suffix ? 0.55 : 1));
     return {
       id: template.id + suffix,
-      name: template.name + (suffix ? '（增援）' : ''),
+      name: factionName(template.factionId) + template.role + (suffix ? '（增援）' : ''),
       factionId: template.factionId,
       hp,
       maxHp: hp,
@@ -207,7 +212,8 @@ export function combatantsForFloor(
 
 interface LeaderTemplate {
   readonly id: string;
-  readonly name: string;
+  /** 同 CombatantTemplate.role：派系那半截由名册来填。 */
+  readonly role: string;
   readonly hp: number;
   readonly actions: readonly CombatantAction[];
 }
@@ -216,7 +222,7 @@ interface LeaderTemplate {
 const LEADERS: Readonly<Record<string, LeaderTemplate>> = {
   'red-ring': {
     id: 'red-warden',
-    name: '赤环执刑官',
+    role: '执刑官',
     hp: 78,
     actions: [
       { id: 'cleave', kind: 'attack', amount: 12, description: '横扫，造成 12 点伤害' },
@@ -226,7 +232,7 @@ const LEADERS: Readonly<Record<string, LeaderTemplate>> = {
   },
   'green-vine': {
     id: 'vine-matron',
-    name: '青蔓主事',
+    role: '主事',
     hp: 72,
     actions: [
       { id: 'strangle', kind: 'attack', amount: 11, description: '绞缠，造成 11 点伤害' },
@@ -252,10 +258,11 @@ export function bossFloorCombatants(
   siege: boolean,
   floor: number,
   otherFactionIds: readonly string[],
+  factionName: (factionId: string) => string,
 ): readonly CombatantState[] {
   const scale = 1 + 0.12 * (floor - 1);
   const build = (
-    template: { id: string; name: string; hp: number; actions: readonly CombatantAction[] },
+    template: { id: string; role: string; hp: number; actions: readonly CombatantAction[] },
     factionId: string,
     suffix: string,
     multiplier: number,
@@ -264,7 +271,10 @@ export function bossFloorCombatants(
     const hp = Math.round(template.hp * scale * multiplier);
     return {
       id: template.id + suffix,
-      name: template.name + (suffix ? `（${suffix === '-escort' ? '亲随' : siege ? '围攻' : '援军'}）` : ''),
+      name:
+        factionName(factionId) +
+        template.role +
+        (suffix ? `（${suffix === '-escort' ? '亲随' : siege ? '围攻' : '援军'}）` : ''),
       factionId,
       hp,
       maxHp: hp,
@@ -304,7 +314,7 @@ function improvisedLeader(factionId: string): LeaderTemplate | undefined {
   if (!template) return undefined;
   return {
     id: `${template.id}-leader`,
-    name: `${template.name}·首领`,
+    role: `${template.role}·首领`,
     hp: template.hp * 2,
     actions: template.actions,
   };
@@ -362,4 +372,8 @@ export const DECKBUILD_TIMEOUT_MS = 6000;
 /** Generation 失败时的内置局势，也是本票唯一的局势（#10 起才真正生成）。 */
 export const BUILT_IN_GENERATION: Generation = {
   title: '围城中的塔',
+  grievance: '赤环认定青蔓私通塔外、偷运补给；青蔓则说是赤环封死了塔道，先断了别人的活路。',
 };
+
+/** 生成一次局势允许等多久。玩家在开局界面上等着，不能太久。 */
+export const GENERATION_TIMEOUT_MS = 8000;
