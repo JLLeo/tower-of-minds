@@ -399,3 +399,31 @@ button.danger {
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* 进塔前组牌：派系页签、计数与「进塔」。 */
+.loadout-tabs,
+.loadout-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+button.loadout-tab {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 16px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.loadout-tab:hover:enabled {
+  border-color: var(--accent);
+}
+
+button.loadout-tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

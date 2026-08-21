@@ -62,6 +62,9 @@ const RED_RING: readonly CardDefinition[] = [
   defineCard('searing', '灼心', 'red-ring', ['burn', 'expose']),
   defineCard('skewer', '穿刺连击', 'red-ring', ['pierce', 'multi']),
   defineCard('accord', '递刀', 'red-ring', ['parley']),
+  // Loadout 只能取自一个 Faction，所以每一派都得拿得出另一条轴上的基本功——
+  // 派系的性格在于**怎么**挡、**怎么**打，不在于能不能。
+  defineCard('formup', '立阵', 'red-ring', ['guard']),
 ];
 
 /** 青蔓：韧性与资源。 */
@@ -77,13 +80,17 @@ const GREEN_VINE: readonly CardDefinition[] = [
   defineCard('foresight', '深谋', 'green-vine', ['draw', 'surge']),
   defineCard('scavenge', '拾遗', 'green-vine', ['recall', 'draw']),
   defineCard('truce', '止戈', 'green-vine', ['parley']),
+  defineCard('vinewhip', '藤鞭', 'green-vine', ['strike']),
 ];
 
 export const CARD_POOL: readonly CardDefinition[] = [...RED_RING, ...GREEN_VINE];
 
+/** 一副 Loadout 有多少张牌。允许重复，所以解锁得少不等于组不出一副。 */
+export const LOADOUT_SIZE = 10;
+
 /**
- * 起始 Deck。#15 会让玩家进塔前自己组 Loadout；在那之前这是固定的一副，
- * 组成与引入 Atom 之前一致，好让既有的平衡与测试保持有效。
+ * 没自己组 Loadout 时用的那一副。它跨了两个 Faction，因此**不是**合法 Loadout——
+ * 它只是既有测试与离线场景的固定基准，保留是为了让引入 Loadout 之前的平衡结论仍然可比。
  */
 export const STARTING_DECK: readonly string[] = [
   'strike', 'strike', 'strike', 'strike', 'strike',

@@ -10,6 +10,13 @@ import {
   standingOf,
 } from './memory.js';
 import {
+  NEW_SAVE_LEDGER,
+  defaultLoadout,
+  earnedUnlocks,
+  grantUnlocks,
+  isLegalLoadout,
+} from './unlocks.js';
+import {
   dropRequests,
   expireRequests,
   fallbackIntent,
@@ -29,7 +36,6 @@ import {
   MAX_ENERGY,
   NORMAL_FLOORS,
   PLAYER_MAX_HP,
-  STARTING_DECK,
   baseCardsOf,
   bossFloorCombatants,
   builtInAgents,
@@ -63,17 +69,22 @@ import type {
  * input 进来，模型的回答也是一种 input——引擎自己既不掷骰、不读时钟，也不联网。
  */
 /**
- * 开一局。先问一次「这一局的塔是什么样」，答上来或超时之后才进第 1 层——
- * 局势是整座 Tower 通用的（ADR-0007），所以它必须在第一层之前定下来。
+ * 开一局。进塔前有两件事要办：玩家组一副 Loadout，模型给出这一局的局势。
+ *
+ * 两件事**并行**：局势的提问在 startRun 就发出去了，玩家挑牌的那几秒正好把它的延迟
+ * 盖掉。两边都齐了才进第 1 层——局势是整座 Tower 通用的（ADR-0007）。
  */
 export function startRun(
   generation: Generation,
   seed: number,
   options: RunOptions = {},
 ): RunState {
-  const deckIds = options.startingDeck ?? STARTING_DECK;
   const startedAtMs = options.startedAtMs ?? 0;
-  const deck: readonly CardInstance[] = deckIds.map((id, index) => mintCard(id, index));
+  // 基础牌永远是解锁的——它们是「基础」的定义。存档里缺了也补上，否则 Loadout 组不出来。
+  const ledger = grantUnlocks(options.ledger ?? NEW_SAVE_LEDGER, NEW_SAVE_LEDGER.cardIds);
+  // 给了 startingDeck 就是替玩家把 Loadout 选好了——测试与离线场景走这条路。
+  const deckIds = options.startingDeck;
+  const deck: readonly CardInstance[] = (deckIds ?? []).map((id, index) => mintCard(id, index));
 
   const seeded: RunState = {
     seed,
@@ -82,22 +93,60 @@ export function startRun(
     generation,
     agentRequests: [],
     nextRequestSeq: 0,
-    nextCardSeq: deckIds.length,
+    nextCardSeq: deck.length,
     floor: 0,
     deck,
     forged: [],
     factionDecks: {},
     memories: {},
     favor: null,
-    phase: 'generating',
+    phase: deckIds ? 'generating' : 'loadout',
     encounter: EMPTY_ENCOUNTER,
     outcome: null,
     journal: ['塔在成形。'],
+    ledger,
+    earnedUnlocks: [],
   };
 
-  // 不生成、直接开打是测试与离线场景的需要：给 options.skipGeneration 用。
-  if (options.skipGeneration) return beginEncounter(seeded, 1, PLAYER_MAX_HP, startedAtMs);
+  // 不问局势是测试与离线场景的需要：给 options.skipGeneration 用。它只管生成——
+  // 还没组 Loadout 的话，照样得等玩家先挑牌。
+  if (options.skipGeneration) {
+    return deckIds ? beginEncounter(seeded, 1, PLAYER_MAX_HP, startedAtMs) : seeded;
+  }
   return openGenerationRequest(seeded, startedAtMs);
+}
+
+/**
+ * 玩家组好了 Loadout。非法的一副（张数不对、有没解锁的牌、跨了 Faction）不会让 Run
+ * 停下，换成确定性的默认牌组——宿主界面本就该挡住这些，引擎在这里只是不许它把局搞坏。
+ */
+function takeLoadout(state: RunState, cardIds: readonly string[]): RunState {
+  const chosen = isLegalLoadout(state.ledger, cardIds)
+    ? cardIds
+    : defaultLoadout(state.ledger, factionOfLoadout(cardIds));
+  const deck: readonly CardInstance[] = chosen.map((id, index) => mintCard(id, index));
+
+  return {
+    ...state,
+    deck,
+    nextCardSeq: deck.length,
+    phase: 'generating',
+    journal: [...state.journal, `你带着${loadoutLabel(state, chosen)}的牌进塔。`],
+  };
+}
+
+/** 这一副牌是哪一派的。混装或空副返回 undefined，交给 defaultLoadout 自己挑。 */
+function factionOfLoadout(cardIds: readonly string[]): string | undefined {
+  const factions = new Set(
+    cardIds.map((id) => CARD_POOL.find((card) => card.id === id)?.faction).filter(Boolean),
+  );
+  return factions.size === 1 ? ([...factions][0] as string) : undefined;
+}
+
+function loadoutLabel(state: RunState, cardIds: readonly string[]): string {
+  const factionId = factionOfLoadout(cardIds);
+  if (!factionId) return '一副来路不明';
+  return state.agents.find((agent) => agent.factionId === factionId)?.name ?? factionId;
 }
 
 /**
@@ -208,10 +257,17 @@ function beginEncounter(state: RunState, floor: number, hp: number, atMs: number
 
 export function applyInput(state: RunState, input: PlayerInput): RunState {
   if (state.phase === 'ended') return state;
+  // 还没进塔：只有组 Loadout、模型的回答与时间流逝算数。
+  if (state.phase === 'loadout') {
+    if (input.type === 'choose_loadout') return takeLoadout(state, input.cardIds);
+    if (input.type !== 'agent_response' && input.type !== 'tick') return state;
+  }
   // 塔还在成形：只有模型的回答与时间流逝算数。
   if (state.phase === 'generating' && input.type !== 'agent_response' && input.type !== 'tick') {
     return state;
   }
+  // Loadout 只在进塔前组一次。
+  if (input.type === 'choose_loadout') return state;
   // 层间：玩家只能选 Favor 或发起融合。但对手的层间构筑是**并行**发生的，
   // 所以模型的回答与时间流逝照常放行——谁都不该被对方的界面挡住。
   if (
@@ -933,9 +989,29 @@ function checkOutcome(state: RunState): RunState {
  * 这里不直接开下一层：开新层需要一个时刻，而时刻只能从 input 进引擎。玩家的
  * choose_favor 会带着它进来。
  */
+/** 通关时 Standing 最高的那一派。都没好感就是 null——没人欠你人情，也没人教你东西。 */
+function favoredFaction(state: RunState): string | null {
+  const scored = state.agents
+    .map((agent) => ({ factionId: agent.factionId, standing: standingOf(state, agent.factionId) }))
+    .filter((entry) => entry.standing > 0)
+    .sort((a, b) => b.standing - a.standing);
+  return scored[0]?.factionId ?? null;
+}
+
+function cardNames(cardIds: readonly string[]): string {
+  return cardIds
+    .map((id) => CARD_POOL.find((card) => card.id === id)?.name ?? id)
+    .join('、');
+}
+
 function clearFloor(state: RunState): RunState {
   // 塔顶清掉了才算走到尽头；第 5 层之后还有一层等着。
   if (isBossFloor(state.floor)) {
+    // 解锁要在抹掉 Memory 之前算：Standing 是从 Memory 推出来的，清完就无从谈起。
+    // 打倒的是**场上那位**首领——重算一遍 topOfTower 会在最后一场里打伤过盟友时给出另一派。
+    const felled = state.encounter.combatants.find((combatant) => combatant.isBoss);
+    const earned = earnedUnlocks(state.ledger, favoredFaction(state), felled?.factionId ?? null);
+
     return {
       ...state,
       phase: 'ended',
@@ -943,7 +1019,13 @@ function clearFloor(state: RunState): RunState {
       memories: {},
       forged: [],
       factionDecks: {},
-      journal: [...state.journal, '塔顶安静了下来。你走到了尽头。'],
+      ledger: grantUnlocks(state.ledger, earned),
+      earnedUnlocks: earned,
+      journal: [
+        ...state.journal,
+        '塔顶安静了下来。你走到了尽头。',
+        ...(earned.length > 0 ? [`这一趟你学到了：${cardNames(earned)}。`] : []),
+      ],
     };
   }
 
@@ -983,6 +1065,7 @@ function clearFloor(state: RunState): RunState {
  * 和层间构筑一样挂在 tick 上：开一层需要一个真实时刻，而时刻只能从 input 进引擎。
  */
 function enterTowerIfReady(state: RunState, atMs: number): RunState {
+  // 'loadout' 也要等——玩家还没挑完牌，局势先定下来也不能开门。
   if (state.phase !== 'generating') return state;
   if (state.agentRequests.some((request) => request.kind === 'generation')) return state;
   return beginEncounter(state, 1, PLAYER_MAX_HP, atMs);

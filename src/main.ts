@@ -4,7 +4,8 @@ import { BUILT_IN_GENERATION } from './engine/content.js';
 import { createDeepSeekProvider } from './llm/deepseek.js';
 import { taskFor } from './llm/provider.js';
 import { render } from './ui/render.js';
-import type { PlayerInput, RunState } from './engine/types.js';
+import { NEW_SAVE_LEDGER } from './engine/unlocks.js';
+import type { PlayerInput, RunState, UnlockLedger } from './engine/types.js';
 
 const root = document.querySelector<HTMLDivElement>('#app');
 if (!root) throw new Error('缺少 #app 挂载点');
@@ -12,8 +13,39 @@ if (!root) throw new Error('缺少 #app 挂载点');
 // 浏览器打到本地代理；API key 由 Node 侧的 vite 配置注入，前端包里没有它。
 const provider = createDeepSeekProvider({ baseUrl: '/api/llm', model: __INTENT_MODEL__ });
 
+/**
+ * Unlock Ledger 是跨 Run 唯一持久的东西（ADR-0009），所以它是唯一存盘的东西。
+ * 存盘归宿主：引擎收下一份 Ledger、还回一份 Ledger，自己不碰 localStorage。
+ *
+ * 读不出来就当新档——存档坏了不该让人打不开游戏。
+ */
+const SAVE_KEY = 'tower-of-minds/unlocks';
+
+function loadLedger(): UnlockLedger {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return NEW_SAVE_LEDGER;
+    const parsed: unknown = JSON.parse(raw);
+    const ids = (parsed as { cardIds?: unknown })?.cardIds;
+    if (!Array.isArray(ids)) return NEW_SAVE_LEDGER;
+    // 基础牌由引擎兜底补上，这里只负责把存档读成合法形状。
+    return { cardIds: ids.filter((id): id is string => typeof id === 'string') };
+  } catch {
+    return NEW_SAVE_LEDGER;
+  }
+}
+
+function saveLedger(ledger: UnlockLedger): void {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(ledger));
+  } catch {
+    // 存不了就存不了（无痕模式、配额满）。这一局照常打完。
+  }
+}
+
 let state: RunState = startRun(BUILT_IN_GENERATION, Date.now(), {
   startedAtMs: performance.now(),
+  ledger: loadLedger(),
 });
 
 /** 正在飞的提问，按 requestId 索引——同时可能有好几个 Agent 在被问。 */
@@ -23,6 +55,8 @@ const inFlight = new Map<string, AbortController>();
 let selectedTargetId: string | null = null;
 let fuseOfferedId: string | null = null;
 let fuseDeckInstanceId: string | null = null;
+let loadoutFaction: string | null = null;
+let loadoutPicks: readonly string[] = [];
 
 function paint(): void {
   render(
@@ -41,6 +75,13 @@ function paint(): void {
         fuseDeckInstanceId = deckInstance;
         paint();
       },
+      loadoutFaction,
+      loadoutPicks,
+      onPickLoadout: (factionId, picks) => {
+        loadoutFaction = factionId;
+        loadoutPicks = picks;
+        paint();
+      },
     },
     dispatch,
     restart,
@@ -52,7 +93,10 @@ function dispatch(input: PlayerInput): void {
   // 引擎在无事发生时原样返回同一个对象——时机条与超时都靠每帧上报时刻，
   // 靠这一步才不至于每帧重绘。
   if (next === state) return;
+  const before = state;
   state = next;
+  // 通关时引擎把这一局挣到的解锁并进了 Ledger。存盘只在它真的变了的时候做。
+  if (state.ledger !== before.ledger) saveLedger(state.ledger);
   paint();
   askAgents();
 }
@@ -101,7 +145,8 @@ setInterval(() => {
     state.agentRequests.length > 0 ||
     state.encounter.pending ||
     state.phase === 'choosing_favor' ||
-    state.phase === 'generating'
+    state.phase === 'generating' ||
+    state.phase === 'loadout'
   ) {
     dispatch({ type: 'tick', atMs: performance.now() });
   }
@@ -110,7 +155,13 @@ setInterval(() => {
 function restart(): void {
   for (const controller of inFlight.values()) controller.abort();
   inFlight.clear();
-  state = startRun(BUILT_IN_GENERATION, Date.now(), { startedAtMs: performance.now() });
+  loadoutFaction = null;
+  loadoutPicks = [];
+  state = startRun(BUILT_IN_GENERATION, Date.now(), {
+    startedAtMs: performance.now(),
+    // 上一局挣到的解锁在这里生效——这是重玩的动机所在。
+    ledger: state.ledger,
+  });
   paint();
   askAgents();
 }

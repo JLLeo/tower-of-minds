@@ -305,7 +305,13 @@ export interface FavorOffer {
   readonly choices: readonly string[];
 }
 
-export type RunPhase = 'generating' | 'in_encounter' | 'choosing_favor' | 'fusing' | 'ended';
+export type RunPhase =
+  | 'loadout'
+  | 'generating'
+  | 'in_encounter'
+  | 'choosing_favor'
+  | 'fusing'
+  | 'ended';
 export type RunOutcome = 'victory' | 'defeat';
 
 export interface RunState {
@@ -351,6 +357,23 @@ export interface RunState {
   readonly encounter: EncounterState;
   readonly outcome: RunOutcome | null;
   readonly journal: readonly string[];
+  /**
+   * 跨 Run 唯一持久的东西（ADR-0009）。Run 中途只读；通关结算时并入这一局挣到的解锁，
+   * 由宿主取走存盘。
+   */
+  readonly ledger: UnlockLedger;
+  /** 这一局挣到的解锁。通关前一直是空的。 */
+  readonly earnedUnlocks: readonly string[];
+}
+
+/**
+ * 跨 Run 持久的存档：你解锁了哪些 Base Card。
+ *
+ * 它只记 Base Card 的 id——融合与突变的产物没有 id 之外的身份，进不来。这是有意的：
+ * 跨 Run 带走一张融合牌等于把某一局的运气变成永久收益。
+ */
+export interface UnlockLedger {
+  readonly cardIds: readonly string[];
 }
 
 // ---------------------------------------------------------------- Inputs
@@ -367,6 +390,11 @@ export type PlayerInput =
       readonly targetId?: string;
     }
   | { readonly type: 'end_turn'; readonly atMs: number }
+  /**
+   * 进塔前组的那一副 Loadout。只能取自一个 Faction——你带着谁的牌进塔是你的第一次
+   * 表态，而它可能和你在塔里的站队打架。非法的一副会被换成确定性的默认牌组。
+   */
+  | { readonly type: 'choose_loadout'; readonly cardIds: readonly string[]; readonly atMs: number }
   /**
    * 模型对一次 AgentRequest 的原样响应。payload 是 unknown：解析与合法性校验都归
    * 引擎（ADR-0001），宿主只负责把网络上拿到的东西原封不动送进来。
@@ -413,7 +441,10 @@ export interface Generation {
  * 卡池本身不可替换——卡池、数值与判定窗口在所有 Run 中保持一致。
  */
 export interface RunOptions {
+  /** 直接指定 Deck，跳过 Loadout 环节。测试与离线场景用。 */
   readonly startingDeck?: readonly string[];
+  /** 这个存档解锁了哪些 Base Card。不给就按新档算。 */
+  readonly ledger?: UnlockLedger;
   /** Run 开始的时刻，用于第一次 IntentRequest 的超时计算。 */
   readonly startedAtMs?: number;
   /** 跳过开局的局势生成，直接用传进来的那份进第 1 层。测试与离线场景用。 */
